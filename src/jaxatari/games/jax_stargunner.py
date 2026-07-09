@@ -12,8 +12,8 @@ from jaxatari.environment import JaxEnvironment, JAXAtariAction as Action, Objec
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 import matplotlib.patches as patches
-import matplotlib.patheffects as pe
 import numpy as np
+
 
 
 class StarGunnerConstants(struct.PyTreeNode):
@@ -27,6 +27,21 @@ class StarGunnerConstants(struct.PyTreeNode):
     PLAYER_START_X: int = struct.field(pytree_node=False, default=20)
     PLAYER_START_Y: int = struct.field(pytree_node=False, default=100)
 
+    # Bullet
+    BULLET_WIDTH: int = struct.field(pytree_node=False, default=4)
+    BULLET_HEIGHT: int = struct.field(pytree_node=False, default=2)
+    BULLET_SPEED: float = struct.field(pytree_node=False, default=5.0)
+
+    #  Enemies
+    NUM_ENEMIES: int = struct.field(pytree_node=False, default=4)
+    ENEMY_WIDTH: int = struct.field(pytree_node=False, default=10)
+    ENEMY_HEIGHT: int = struct.field(pytree_node=False, default=8)
+    ENEMY_SPEED: float = struct.field(pytree_node=False, default=1.0)
+    ENEMY_AMP: float = struct.field(pytree_node=False, default=8.0)
+    ENEMY_SCORE: int = struct.field(pytree_node=False, default=10)
+
+    PLAYER_LIVES_START: int = struct.field(pytree_node=False, default=3)
+
 
 class StarGunnerState(struct.PyTreeNode):
     player_x: chex.Array
@@ -34,8 +49,23 @@ class StarGunnerState(struct.PyTreeNode):
     step_counter: chex.Array
     key: chex.PRNGKey
 
-    #  grass
+    # grass
     grass_offset: chex.Array
+
+    # bullet
+    bullet_x: chex.Array
+    bullet_y: chex.Array
+    bullet_active: chex.Array
+
+    # enemies (fixed-size arrays, shape (NUM_ENEMIES,))
+    enemy_x: chex.Array
+    enemy_y: chex.Array    # base y (wave is added on top for rendering/collision)
+    enemy_phase: chex.Array
+    enemy_alive: chex.Array
+
+    score: chex.Array
+    lives: chex.Array
+
 
 class StarGunnerObservation(struct.PyTreeNode):
     player: ObjectObservation
@@ -58,9 +88,17 @@ def draw_rect(img, x, y, w, h, color):
 
     return jnp.where(mask[:, :, None], color, img)
 
-# -----------------------------
+
+def _aabb_overlap(ax, ay, aw, ah, bx, by, bw, bh):
+    """Vectorized axis-aligned bounding box overlap test."""
+    return (
+        (ax < bx + bw) & (ax + aw > bx) &
+        (ay < by + bh) & (ay + ah > by)
+    )
+
+
+
 # ENVIRONMENT
-# -----------------------------
 
 class JaxStarGunner(JaxEnvironment[
     StarGunnerState,
@@ -68,12 +106,15 @@ class JaxStarGunner(JaxEnvironment[
     StarGunnerInfo,
     StarGunnerConstants
 ]):
+    # NOTE: index into this array is the "action" the agent/renderer passes to step().
+    # Keep renderer key->index mappings in sync with this ordering.
     ACTION_SET = jnp.array([
-        Action.NOOP,
-        Action.UP,
-        Action.DOWN,
-        Action.LEFT,
-        Action.RIGHT,
+        Action.NOOP,   # 0
+        Action.UP,     # 1
+        Action.DOWN,   # 2
+        Action.LEFT,   # 3
+        Action.RIGHT,  # 4
+        Action.FIRE,   # 5
     ], dtype=jnp.int32)
 
     def __init__(self, consts: StarGunnerConstants = None):
@@ -81,70 +122,189 @@ class JaxStarGunner(JaxEnvironment[
         super().__init__(consts)
         self.renderer = True
 
-        # -------------------------
-        # STARS INIT
-        # -------------------------
-    def _init_stars(self, key, n=120):
-        k1, k2, k3, k4 = jax.random.split(key, 4)
 
-        stars_x = jax.random.randint(k1, (n,), 0, self.consts.WIDTH)
-        stars_y = jax.random.randint(k2, (n,), 0, self.consts.HEIGHT)
+    # ENEMY SPAWN HELPERS
 
-        stars_speed = jax.random.uniform(k3, (n,), minval=0.3, maxval=1.8)
-        stars_brightness = jax.random.uniform(k4, (n,), minval=0.4, maxval=1.0)
-
-        return stars_x, stars_y, stars_speed, stars_brightness
-
+    def _spawn_enemy(self, key, index):
+        """Returns (x, y, phase) for a freshly (re)spawned enemy at the right edge."""
+        k1, k2, k3 = jax.random.split(key, 3)
+        jitter = jax.random.uniform(k1, (), minval=0.0, maxval=60.0)
+        x = self.consts.WIDTH + 20.0 + index.astype(jnp.float32) * 40.0 + jitter
+        y = jax.random.uniform(
+            k2, (),
+            minval=float(self.consts.ENEMY_AMP + 10),
+            maxval=float(self.consts.HEIGHT - self.consts.ENEMY_HEIGHT - self.consts.ENEMY_AMP - 10),
+        )
+        phase = jax.random.uniform(k3, (), minval=0.0, maxval=2 * jnp.pi)
+        return x, y, phase
 
     def reset(self, key: chex.PRNGKey = jax.random.PRNGKey(0)):
+        n = self.consts.NUM_ENEMIES
+        keys = jax.random.split(key, n)
+        idxs = jnp.arange(n)
 
-        stars_x, stars_y, stars_speed, stars_brightness = self._init_stars(key)
+        spawn_fn = jax.vmap(self._spawn_enemy)
+        ex, ey, ephase = spawn_fn(keys, idxs)
 
         state = StarGunnerState(
-            player_x=jnp.array(self.consts.PLAYER_START_X, dtype=jnp.int32),
-            player_y=jnp.array(self.consts.PLAYER_START_Y, dtype=jnp.int32),
+            player_x=jnp.array(self.consts.PLAYER_START_X, dtype=jnp.float32),
+            player_y=jnp.array(self.consts.PLAYER_START_Y, dtype=jnp.float32),
             step_counter=jnp.array(0, dtype=jnp.int32),
             key=key,
 
-            grass_offset=jnp.array(0.0)
+            grass_offset=jnp.array(0.0),
+
+            bullet_x=jnp.array(0.0),
+            bullet_y=jnp.array(0.0),
+            bullet_active=jnp.array(False),
+
+            enemy_x=ex,
+            enemy_y=ey,
+            enemy_phase=ephase,
+            enemy_alive=jnp.ones((n,), dtype=jnp.bool_),
+
+            score=jnp.array(0, dtype=jnp.int32),
+            lives=jnp.array(self.consts.PLAYER_LIVES_START, dtype=jnp.int32),
         )
 
         return self._get_observation(state), state
 
-    # -------------------------
+
     # PLAYER MOVE
-    # -------------------------
+
     def _player_step(self, state: StarGunnerState, action: chex.Array):
-        dx = jnp.where(action == Action.LEFT, -self.consts.PLAYER_SPEED, 0)
-        dx = jnp.where(action == Action.RIGHT, self.consts.PLAYER_SPEED, dx)
+        # Bewegungs-Vektoren definieren
+        move_x = jnp.where(action == Action.LEFT, -1.0, 0.0) + jnp.where(action == Action.RIGHT, 1.0, 0.0)
+        move_y = jnp.where(action == Action.UP, -1.0, 0.0) + jnp.where(action == Action.DOWN, 1.0, 0.0)
 
-        dy = jnp.where(action == Action.UP, -self.consts.PLAYER_SPEED, 0)
-        dy = jnp.where(action == Action.DOWN, self.consts.PLAYER_SPEED, dy)
+        # Diagonale normalisieren (falls nötig, um 1.0 zu halten)
+        norm = jnp.sqrt(move_x ** 2 + move_y ** 2)
+        move_x = jnp.where(norm > 0, move_x / norm, 0.0)
+        move_y = jnp.where(norm > 0, move_y / norm, 0.0)
 
-        new_x = jnp.clip(
-            state.player_x + dx,
-            0,
-            self.consts.WIDTH - self.consts.PLAYER_WIDTH,
-        )
+        new_x = jnp.clip(state.player_x + move_x * self.consts.PLAYER_SPEED, 0,
+                         self.consts.WIDTH - self.consts.PLAYER_WIDTH)
+        new_y = jnp.clip(state.player_y + move_y * self.consts.PLAYER_SPEED, 0,
+                         self.consts.HEIGHT - self.consts.PLAYER_HEIGHT)
 
-        new_y = jnp.clip(
-            state.player_y + dy,
-            0,
-            self.consts.HEIGHT - self.consts.PLAYER_HEIGHT,
-        )
+        return state.replace(player_x=new_x, player_y=new_y)
+
+    # BULLET
+    def _bullet_step(self, state: StarGunnerState, action: chex.Array):
+        fire_pressed = action == Action.FIRE
+        spawn = fire_pressed & (~state.bullet_active)
+
+        spawn_x = state.player_x + self.consts.PLAYER_WIDTH
+        spawn_y = state.player_y + self.consts.PLAYER_HEIGHT / 2.0 - self.consts.BULLET_HEIGHT / 2.0
+
+        bullet_x = jnp.where(spawn, spawn_x, state.bullet_x)
+        bullet_y = jnp.where(spawn, spawn_y, state.bullet_y)
+        bullet_active = state.bullet_active | spawn
+
+        # advance active bullet
+        bullet_x = jnp.where(bullet_active, bullet_x + self.consts.BULLET_SPEED, bullet_x)
+
+        # deactivate once off-screen
+        bullet_active = bullet_active & (bullet_x < self.consts.WIDTH)
 
         return state.replace(
-            player_x=new_x,
-            player_y=new_y,
+            bullet_x=bullet_x,
+            bullet_y=bullet_y,
+            bullet_active=bullet_active,
         )
+
+    # ENEMIES
+    def _enemy_display_y(self, state: StarGunnerState):
+        """Actual on-screen y including the sinusoidal bob, per enemy."""
+        return state.enemy_y + self.consts.ENEMY_AMP * jnp.sin(
+            state.enemy_phase + state.step_counter.astype(jnp.float32) * 0.1
+        )
+
+    def _enemy_step(self, state: StarGunnerState):
+        moved_x = state.enemy_x - self.consts.ENEMY_SPEED
+
+        off_screen = moved_x < -self.consts.ENEMY_WIDTH
+        needs_respawn = (~state.enemy_alive) | off_screen
+
+        n = self.consts.NUM_ENEMIES
+        keys = jax.random.split(state.key, n + 1)
+        state_key, spawn_keys = keys[0], keys[1:]
+        idxs = jnp.arange(n)
+
+        spawn_fn = jax.vmap(self._spawn_enemy)
+        respawn_x, respawn_y, respawn_phase = spawn_fn(spawn_keys, idxs)
+
+        new_x = jnp.where(needs_respawn, respawn_x, moved_x)
+        new_y = jnp.where(needs_respawn, respawn_y, state.enemy_y)
+        new_phase = jnp.where(needs_respawn, respawn_phase, state.enemy_phase)
+        new_alive = jnp.ones((n,), dtype=jnp.bool_)  # freshly respawned or still alive
+
+        return state.replace(
+            enemy_x=new_x,
+            enemy_y=new_y,
+            enemy_phase=new_phase,
+            enemy_alive=new_alive,
+            key=state_key,
+        )
+
+    # COLLISIONS
+
+    def _resolve_collisions(self, state: StarGunnerState):
+        enemy_disp_y = self._enemy_display_y(state)
+
+        # 1. Kollisionstest: Kugel vs. alle Gegner (Vektorisiert)
+        bullet_hits = _aabb_overlap(
+            state.bullet_x, state.bullet_y,
+            self.consts.BULLET_WIDTH, self.consts.BULLET_HEIGHT,
+            state.enemy_x, enemy_disp_y,
+            self.consts.ENEMY_WIDTH, self.consts.ENEMY_HEIGHT,
+        ) & state.enemy_alive & state.bullet_active
+
+        # 2. Kollisionstest: Spieler vs. alle Gegner (Vektorisiert)
+        player_hits = _aabb_overlap(
+            state.player_x, state.player_y,
+            self.consts.PLAYER_WIDTH, self.consts.PLAYER_HEIGHT,
+            state.enemy_x, enemy_disp_y,
+            self.consts.ENEMY_WIDTH, self.consts.ENEMY_HEIGHT,
+        ) & state.enemy_alive
+
+        # 3. Berechnungen
+        num_hits = jnp.sum(bullet_hits).astype(jnp.int32)
+        reward = num_hits.astype(jnp.float32) * self.consts.ENEMY_SCORE
+        new_score = state.score + (num_hits * self.consts.ENEMY_SCORE)
+
+        # Kugel deaktivieren, wenn irgendein Treffer stattgefunden hat
+        new_bullet_active = state.bullet_active & (~jnp.any(bullet_hits))
+
+        # Leben abziehen bei Spieler-Gegner-Kollision
+        player_damaged = jnp.any(player_hits)
+        new_lives = jnp.maximum(0, state.lives - player_damaged.astype(jnp.int32))
+
+        # Gegner-Status: Wer getroffen wurde (Kugel oder Spieler), stirbt
+        killed = bullet_hits | player_hits
+        new_alive = state.enemy_alive & (~killed)
+
+        done = new_lives <= 0
+
+        # 4. State Update
+        state = state.replace(
+            score=new_score,
+            lives=new_lives,
+            bullet_active=new_bullet_active,
+            enemy_alive=new_alive,
+        )
+        return state, reward, done
 
     @partial(jax.jit, static_argnums=(0,))
     def step(self, state: StarGunnerState, action: chex.Array):
         atari_action = jnp.take(self.ACTION_SET, action.astype(jnp.int32))
 
         state = self._player_step(state, atari_action)
+        state = self._bullet_step(state, atari_action)
+        state, reward, done = self._resolve_collisions(state)
+        state = self._enemy_step(state)
 
-        #  move grass
+        # move grass
         new_offset = (state.grass_offset + 1.2) % 24
 
         state = state.replace(
@@ -153,15 +313,12 @@ class JaxStarGunner(JaxEnvironment[
         )
 
         obs = self._get_observation(state)
-        reward = jnp.array(0.0)
-        done = jnp.array(False)
         info = self._get_info(state)
 
         return obs, state, reward, done, info
 
-    # -------------------------
     # BACKGROUND
-    # -------------------------
+
     def draw_background(self, img, state):
         H = self.consts.HEIGHT
         W = self.consts.WIDTH
@@ -171,13 +328,9 @@ class JaxStarGunner(JaxEnvironment[
         yy = jnp.arange(H)[:, None]
         xx = jnp.arange(W)[None, :]
 
-        # stabile Grundhöhe
         base_horizon = 165
 
         offset = state.grass_offset
-        # ----------------------------------
-        # Wellige Oberkante des Grases
-        # ----------------------------------
 
         horizon = (
                 base_horizon
@@ -186,10 +339,6 @@ class JaxStarGunner(JaxEnvironment[
         )
 
         grass_mask = yy >= horizon
-
-        # ----------------------------------
-        # Grasmuster
-        # ----------------------------------
 
         y_rel = yy - horizon
         y_scroll = (y_rel + offset) % 24
@@ -207,25 +356,29 @@ class JaxStarGunner(JaxEnvironment[
         medium_green = jnp.array([40, 150, 40], dtype=jnp.uint8)
         bright_green = jnp.array([90, 220, 90], dtype=jnp.uint8)
 
-        img = jnp.where(
-            grass_mask[..., None],
-            dark_green,
-            img
-        )
-
-        img = jnp.where(
-            (grass_mask & medium)[..., None],
-            medium_green,
-            img
-        )
-
-        img = jnp.where(
-            (grass_mask & bright)[..., None],
-            bright_green,
-            img
-        )
+        img = jnp.where(grass_mask[..., None], dark_green, img)
+        img = jnp.where((grass_mask & medium)[..., None], medium_green, img)
+        img = jnp.where((grass_mask & bright)[..., None], bright_green, img)
 
         return img
+
+    def _draw_enemies(self, img, state):
+        enemy_disp_y = self._enemy_display_y(state)
+        enemy_color = jnp.array([255, 80, 0], dtype=jnp.uint8)
+
+        # NUM_ENEMIES is a static (Python int) constant, so this unrolls under jit.
+        for i in range(self.consts.NUM_ENEMIES):
+            color = jnp.where(state.enemy_alive[i], enemy_color, jnp.array([0, 0, 0], dtype=jnp.uint8))
+            w = jnp.where(state.enemy_alive[i], self.consts.ENEMY_WIDTH, 0)
+            h = jnp.where(state.enemy_alive[i], self.consts.ENEMY_HEIGHT, 0)
+            img = draw_rect(img, state.enemy_x[i], enemy_disp_y[i], w, h, color)
+        return img
+
+    def _draw_bullet(self, img, state):
+        bullet_color = jnp.array([255, 255, 0], dtype=jnp.uint8)
+        w = jnp.where(state.bullet_active, self.consts.BULLET_WIDTH, 0)
+        h = jnp.where(state.bullet_active, self.consts.BULLET_HEIGHT, 0)
+        return draw_rect(img, state.bullet_x, state.bullet_y, w, h, bullet_color)
 
     @partial(jax.jit, static_argnums=(0,))
     def render(self, state: StarGunnerState):
@@ -234,11 +387,11 @@ class JaxStarGunner(JaxEnvironment[
             dtype=jnp.uint8,
         )
 
-        # Hintergrund zeichnen
         img = self.draw_background(img, state)
+        img = self._draw_enemies(img, state)
+        img = self._draw_bullet(img, state)
 
         player_color = jnp.array([0, 255, 0], dtype=jnp.uint8)
-
         img = draw_rect(
             img,
             state.player_x,
@@ -447,11 +600,14 @@ class StarGunnerRenderer:
         self._demo_score = 0
         self._rng = rng
 
+        # NOTE: index values must match JaxStarGunner.ACTION_SET ordering:
+        # 0=NOOP, 1=UP, 2=DOWN, 3=LEFT, 4=RIGHT, 5=FIRE
         self.action_map = {
             "up": jnp.array(1),
             "down": jnp.array(2),
             "left": jnp.array(3),
             "right": jnp.array(4),
+            " ": jnp.array(5),       # spacebar to fire
         }
 
     def _draw_player_ship(self, ax, x, y):
@@ -674,12 +830,29 @@ class StarGunnerRenderer:
 
     def _draw_game_screen(self):
         ax = self.ax
-        frame = self.np.array(self.env.render(self.game_ctx["state"]))
+        state = self.game_ctx["state"]
+        frame = self.np.array(self.env.render(state))
         ax.clear()
         ax.axis("off")
         ax.imshow(frame, origin="upper", aspect="auto", extent=[0, 160, 210, 0])
         ax.set_xlim(0, 160)
         ax.set_ylim(210, 0)
+
+        # Overlay the real HUD using live state from the environment.
+        self._draw_hud(
+            ax,
+            score=int(state.score),
+            hi_score=max(int(state.score), self.game_ctx.get("high_score", 0)),
+            lives=int(state.lives),
+        )
+
+        if int(state.lives) <= 0:
+            self.game_ctx["high_score"] = max(int(state.score), self.game_ctx.get("high_score", 0))
+            ax.text(80, 105, "GAME OVER",
+                    fontsize=22, fontweight="bold", color="#FF3333",
+                    ha="center", va="center", fontfamily="monospace", zorder=10)
+            self.game_ctx["screen"] = "start"
+            self.game_ctx["score"] = self.game_ctx["high_score"]
 
     def _update(self, _frame):
         screen = self.game_ctx["screen"]
