@@ -31,6 +31,7 @@ class StarGunnerConstants(struct.PyTreeNode):
     BULLET_WIDTH: int = struct.field(pytree_node=False, default=4)
     BULLET_HEIGHT: int = struct.field(pytree_node=False, default=2)
     BULLET_SPEED: float = struct.field(pytree_node=False, default=5.0)
+    MAX_BULLETS: int = struct.field(pytree_node=False, default=5)
 
     #  Enemies
     NUM_ENEMIES: int = struct.field(pytree_node=False, default=4)
@@ -41,6 +42,17 @@ class StarGunnerConstants(struct.PyTreeNode):
     ENEMY_SCORE: int = struct.field(pytree_node=False, default=10)
 
     PLAYER_LIVES_START: int = struct.field(pytree_node=False, default=3)
+
+    # Explosion
+    EXPLOSION_SIZE: int = struct.field(
+        pytree_node=False,
+        default=10,
+    )
+
+    EXPLOSION_DURATION: int = struct.field(
+        pytree_node=False,
+        default=10,
+    )
 
 
 class StarGunnerState(struct.PyTreeNode):
@@ -65,6 +77,12 @@ class StarGunnerState(struct.PyTreeNode):
 
     score: chex.Array
     lives: chex.Array
+
+    #explosion
+    explosion_x: chex.Array
+    explosion_y: chex.Array
+    explosion_timer: chex.Array
+    explosion_active: chex.Array
 
 
 class StarGunnerObservation(struct.PyTreeNode):
@@ -115,6 +133,10 @@ class JaxStarGunner(JaxEnvironment[
         Action.LEFT,   # 3
         Action.RIGHT,  # 4
         Action.FIRE,   # 5
+        Action.UPFIRE, # 6
+        Action.DOWNFIRE,  # 7
+        Action.LEFTFIRE,  # 8
+        Action.RIGHTFIRE, # 9
     ], dtype=jnp.int32)
 
     def __init__(self, consts: StarGunnerConstants = None):
@@ -154,9 +176,9 @@ class JaxStarGunner(JaxEnvironment[
 
             grass_offset=jnp.array(0.0),
 
-            bullet_x=jnp.array(0.0),
-            bullet_y=jnp.array(0.0),
-            bullet_active=jnp.array(False),
+            bullet_x=jnp.zeros((self.consts.MAX_BULLETS,), dtype=jnp.float32),
+            bullet_y=jnp.zeros((self.consts.MAX_BULLETS,), dtype=jnp.float32),
+            bullet_active=jnp.zeros((self.consts.MAX_BULLETS,), dtype=jnp.bool_),
 
             enemy_x=ex,
             enemy_y=ey,
@@ -165,6 +187,26 @@ class JaxStarGunner(JaxEnvironment[
 
             score=jnp.array(0, dtype=jnp.int32),
             lives=jnp.array(self.consts.PLAYER_LIVES_START, dtype=jnp.int32),
+
+            explosion_x=jnp.zeros(
+                (self.consts.NUM_ENEMIES,),
+                dtype=jnp.float32,
+            ),
+
+            explosion_y=jnp.zeros(
+                (self.consts.NUM_ENEMIES,),
+                dtype=jnp.float32,
+            ),
+
+            explosion_timer=jnp.zeros(
+                (self.consts.NUM_ENEMIES,),
+                dtype=jnp.int32,
+            ),
+
+            explosion_active=jnp.zeros(
+                (self.consts.NUM_ENEMIES,),
+                dtype=jnp.bool_,
+            ),
         )
 
         return self._get_observation(state), state
@@ -174,8 +216,28 @@ class JaxStarGunner(JaxEnvironment[
 
     def _player_step(self, state: StarGunnerState, action: chex.Array):
         # Bewegungs-Vektoren definieren
-        move_x = jnp.where(action == Action.LEFT, -1.0, 0.0) + jnp.where(action == Action.RIGHT, 1.0, 0.0)
-        move_y = jnp.where(action == Action.UP, -1.0, 0.0) + jnp.where(action == Action.DOWN, 1.0, 0.0)
+        left = (
+                (action == Action.LEFT)
+                | (action == Action.LEFTFIRE)
+        )
+
+        right = (
+                (action == Action.RIGHT)
+                | (action == Action.RIGHTFIRE)
+        )
+
+        up = (
+                (action == Action.UP)
+                | (action == Action.UPFIRE)
+        )
+
+        down = (
+                (action == Action.DOWN)
+                | (action == Action.DOWNFIRE)
+        )
+
+        move_x = left.astype(jnp.float32) * (-1.0) + right.astype(jnp.float32)
+        move_y = up.astype(jnp.float32) * (-1.0) + down.astype(jnp.float32)
 
         # Diagonale normalisieren (falls nötig, um 1.0 zu halten)
         norm = jnp.sqrt(move_x ** 2 + move_y ** 2)
@@ -191,21 +253,62 @@ class JaxStarGunner(JaxEnvironment[
 
     # BULLET
     def _bullet_step(self, state: StarGunnerState, action: chex.Array):
-        fire_pressed = action == Action.FIRE
-        spawn = fire_pressed & (~state.bullet_active)
+        fire_pressed = (
+                (action == Action.FIRE)
+                | (action == Action.UPFIRE)
+                | (action == Action.DOWNFIRE)
+                | (action == Action.LEFTFIRE)
+                | (action == Action.RIGHTFIRE)
+        )
 
         spawn_x = state.player_x + self.consts.PLAYER_WIDTH
-        spawn_y = state.player_y + self.consts.PLAYER_HEIGHT / 2.0 - self.consts.BULLET_HEIGHT / 2.0
+        spawn_y = (
+                state.player_y
+                + self.consts.PLAYER_HEIGHT / 2
+                - self.consts.BULLET_HEIGHT / 2
+        )
 
-        bullet_x = jnp.where(spawn, spawn_x, state.bullet_x)
-        bullet_y = jnp.where(spawn, spawn_y, state.bullet_y)
-        bullet_active = state.bullet_active | spawn
+        bullet_x = state.bullet_x
+        bullet_y = state.bullet_y
+        bullet_active = state.bullet_active
 
-        # advance active bullet
-        bullet_x = jnp.where(bullet_active, bullet_x + self.consts.BULLET_SPEED, bullet_x)
+        # freien Slot suchen
+        free_slot = jnp.argmax(~bullet_active)
 
-        # deactivate once off-screen
-        bullet_active = bullet_active & (bullet_x < self.consts.WIDTH)
+        can_spawn = (~jnp.all(bullet_active)) & fire_pressed
+
+        bullet_x = jax.lax.cond(
+            can_spawn,
+            lambda x: x.at[free_slot].set(spawn_x),
+            lambda x: x,
+            bullet_x,
+        )
+
+        bullet_y = jax.lax.cond(
+            can_spawn,
+            lambda y: y.at[free_slot].set(spawn_y),
+            lambda y: y,
+            bullet_y,
+        )
+
+        bullet_active = jax.lax.cond(
+            can_spawn,
+            lambda a: a.at[free_slot].set(True),
+            lambda a: a,
+            bullet_active,
+        )
+
+        # alle Bullets bewegen
+        bullet_x = jnp.where(
+            bullet_active,
+            bullet_x + self.consts.BULLET_SPEED,
+            bullet_x,
+        )
+
+        # außerhalb des Bildes deaktivieren
+        bullet_active = bullet_active & (
+                bullet_x < self.consts.WIDTH
+        )
 
         return state.replace(
             bullet_x=bullet_x,
@@ -253,12 +356,23 @@ class JaxStarGunner(JaxEnvironment[
         enemy_disp_y = self._enemy_display_y(state)
 
         # 1. Kollisionstest: Kugel vs. alle Gegner (Vektorisiert)
-        bullet_hits = _aabb_overlap(
-            state.bullet_x, state.bullet_y,
-            self.consts.BULLET_WIDTH, self.consts.BULLET_HEIGHT,
-            state.enemy_x, enemy_disp_y,
-            self.consts.ENEMY_WIDTH, self.consts.ENEMY_HEIGHT,
-        ) & state.enemy_alive & state.bullet_active
+        bullet_hits = jax.vmap(
+            lambda bx, by, active:
+            _aabb_overlap(
+                bx,
+                by,
+                self.consts.BULLET_WIDTH,
+                self.consts.BULLET_HEIGHT,
+                state.enemy_x,
+                enemy_disp_y,
+                self.consts.ENEMY_WIDTH,
+                self.consts.ENEMY_HEIGHT,
+            ) & active & state.enemy_alive
+        )(
+            state.bullet_x,
+            state.bullet_y,
+            state.bullet_active,
+        )
 
         # 2. Kollisionstest: Spieler vs. alle Gegner (Vektorisiert)
         player_hits = _aabb_overlap(
@@ -269,19 +383,46 @@ class JaxStarGunner(JaxEnvironment[
         ) & state.enemy_alive
 
         # 3. Berechnungen
-        num_hits = jnp.sum(bullet_hits).astype(jnp.int32)
+        enemy_hit = jnp.any(bullet_hits, axis=0)
+
+        new_explosion_active = state.explosion_active | enemy_hit
+
+        new_explosion_timer = jnp.where(
+            enemy_hit,
+            self.consts.EXPLOSION_DURATION,
+            state.explosion_timer,
+        )
+
+        new_explosion_x = jnp.where(
+            enemy_hit,
+            state.enemy_x,
+            state.explosion_x,
+        )
+
+        new_explosion_y = jnp.where(
+            enemy_hit,
+            enemy_disp_y,
+            state.explosion_y,
+        )
+
+        num_hits = jnp.sum(enemy_hit)
         reward = num_hits.astype(jnp.float32) * self.consts.ENEMY_SCORE
         new_score = state.score + (num_hits * self.consts.ENEMY_SCORE)
 
         # Kugel deaktivieren, wenn irgendein Treffer stattgefunden hat
-        new_bullet_active = state.bullet_active & (~jnp.any(bullet_hits))
+        bullet_destroyed = jnp.any(bullet_hits, axis=1)
+
+        new_bullet_active = (
+                state.bullet_active
+                & (~bullet_destroyed)
+        )
 
         # Leben abziehen bei Spieler-Gegner-Kollision
         player_damaged = jnp.any(player_hits)
         new_lives = jnp.maximum(0, state.lives - player_damaged.astype(jnp.int32))
 
         # Gegner-Status: Wer getroffen wurde (Kugel oder Spieler), stirbt
-        killed = bullet_hits | player_hits
+        killed = enemy_hit | player_hits
         new_alive = state.enemy_alive & (~killed)
 
         done = new_lives <= 0
@@ -292,6 +433,10 @@ class JaxStarGunner(JaxEnvironment[
             lives=new_lives,
             bullet_active=new_bullet_active,
             enemy_alive=new_alive,
+            explosion_x=new_explosion_x,
+            explosion_y=new_explosion_y,
+            explosion_timer=new_explosion_timer,
+            explosion_active=new_explosion_active,
         )
         return state, reward, done
 
@@ -301,8 +446,11 @@ class JaxStarGunner(JaxEnvironment[
 
         state = self._player_step(state, atari_action)
         state = self._bullet_step(state, atari_action)
-        state, reward, done = self._resolve_collisions(state)
         state = self._enemy_step(state)
+
+        state, reward, done = self._resolve_collisions(state)
+
+        state = self._explosion_step(state)
 
         # move grass
         new_offset = (state.grass_offset + 1.2) % 24
@@ -317,8 +465,40 @@ class JaxStarGunner(JaxEnvironment[
 
         return obs, state, reward, done, info
 
-    # BACKGROUND
+    # Draw Explosion
+    def _draw_explosions(self, img, state):
 
+
+        for i in range(self.consts.NUM_ENEMIES):
+            size = jnp.where(
+                state.explosion_active[i],
+                self.consts.EXPLOSION_SIZE
+                + (
+                        self.consts.EXPLOSION_DURATION
+                        - state.explosion_timer[i]
+                ),
+                0,
+            )
+            color = jnp.where(
+                state.explosion_timer[i] > 6,
+                jnp.array([255, 220, 0], dtype=jnp.uint8),  # gelb
+
+                jnp.array([255, 80, 0], dtype=jnp.uint8),  # orange
+            )
+
+            img = draw_rect(
+                img,
+                state.explosion_x[i],
+                state.explosion_y[i],
+                size,
+                size,
+                color,
+            )
+
+        return img
+
+
+    # BACKGROUND
     def draw_background(self, img, state):
         H = self.consts.HEIGHT
         W = self.consts.WIDTH
@@ -362,6 +542,20 @@ class JaxStarGunner(JaxEnvironment[
 
         return img
 
+    def _explosion_step(self, state: StarGunnerState):
+
+        timer = jnp.maximum(
+            state.explosion_timer - 1,
+            0,
+        )
+
+        active = timer > 0
+
+        return state.replace(
+            explosion_timer=timer,
+            explosion_active=active,
+        )
+
     def _draw_enemies(self, img, state):
         enemy_disp_y = self._enemy_display_y(state)
         enemy_color = jnp.array([255, 80, 0], dtype=jnp.uint8)
@@ -375,10 +569,32 @@ class JaxStarGunner(JaxEnvironment[
         return img
 
     def _draw_bullet(self, img, state):
+
         bullet_color = jnp.array([255, 255, 0], dtype=jnp.uint8)
-        w = jnp.where(state.bullet_active, self.consts.BULLET_WIDTH, 0)
-        h = jnp.where(state.bullet_active, self.consts.BULLET_HEIGHT, 0)
-        return draw_rect(img, state.bullet_x, state.bullet_y, w, h, bullet_color)
+
+        for i in range(self.consts.MAX_BULLETS):
+            w = jnp.where(
+                state.bullet_active[i],
+                self.consts.BULLET_WIDTH,
+                0,
+            )
+
+            h = jnp.where(
+                state.bullet_active[i],
+                self.consts.BULLET_HEIGHT,
+                0,
+            )
+
+            img = draw_rect(
+                img,
+                state.bullet_x[i],
+                state.bullet_y[i],
+                w,
+                h,
+                bullet_color,
+            )
+
+        return img
 
     @partial(jax.jit, static_argnums=(0,))
     def render(self, state: StarGunnerState):
@@ -390,6 +606,7 @@ class JaxStarGunner(JaxEnvironment[
         img = self.draw_background(img, state)
         img = self._draw_enemies(img, state)
         img = self._draw_bullet(img, state)
+        img = self._draw_explosions(img, state)
 
         player_color = jnp.array([0, 255, 0], dtype=jnp.uint8)
         img = draw_rect(
@@ -544,6 +761,13 @@ class StarGunnerRenderer:
             })
 
         self.demo_ship = {"x": -20.0, "y": 60.0, "vy": 0.0, "target_y": 60.0}
+
+        self.up_pressed = False
+        self.down_pressed = False
+        self.left_pressed = False
+        self.right_pressed = False
+        self.fire_pressed = False
+
         self.current_action = jnp.array(0)
         self.bolts = []
 
@@ -600,15 +824,6 @@ class StarGunnerRenderer:
         self._demo_score = 0
         self._rng = rng
 
-        # NOTE: index values must match JaxStarGunner.ACTION_SET ordering:
-        # 0=NOOP, 1=UP, 2=DOWN, 3=LEFT, 4=RIGHT, 5=FIRE
-        self.action_map = {
-            "up": jnp.array(1),
-            "down": jnp.array(2),
-            "left": jnp.array(3),
-            "right": jnp.array(4),
-            " ": jnp.array(5),       # spacebar to fire
-        }
 
     def _draw_player_ship(self, ax, x, y):
         P = self.patches.Rectangle
@@ -786,6 +1001,7 @@ class StarGunnerRenderer:
         ax = self.ax
         cf = self.game_ctx["countdown_frame"]
 
+
         ax.clear()
         ax.set_facecolor("black")
         ax.set_xlim(0, 160)
@@ -888,14 +1104,74 @@ class StarGunnerRenderer:
             if event.key == "escape":
                 self.game_ctx["screen"] = "start"
                 return
-            self.current_action = self.action_map.get(
-                event.key,
-                jnp.array(0)
-            )
+            if event.key == "up":
+                self.up_pressed = True
+
+            elif event.key == "down":
+                self.down_pressed = True
+
+            elif event.key == "left":
+                self.left_pressed = True
+
+            elif event.key == "right":
+                self.right_pressed = True
+
+            elif event.key == " ":
+                self.fire_pressed = True
+
+            self._update_action()
 
     def _on_key_release(self, event):
         if self.game_ctx["screen"] == "playing":
-            self.current_action = jnp.array(0)  # NOOP
+            if event.key == "up":
+                self.up_pressed = False
+
+            elif event.key == "down":
+                self.down_pressed = False
+
+            elif event.key == "left":
+                self.left_pressed = False
+
+            elif event.key == "right":
+                self.right_pressed = False
+
+            elif event.key == " ":
+                self.fire_pressed = False
+
+            self._update_action()
+
+    def _update_action(self):
+
+        if self.up_pressed and self.fire_pressed:
+            self.current_action = jnp.array(6)  # UPFIRE
+
+        elif self.down_pressed and self.fire_pressed:
+            self.current_action = jnp.array(7)  # DOWNFIRE
+
+        elif self.left_pressed and self.fire_pressed:
+            self.current_action = jnp.array(8)  # LEFTFIRE
+
+        elif self.right_pressed and self.fire_pressed:
+            self.current_action = jnp.array(9)  # RIGHTFIRE
+
+        elif self.up_pressed:
+            self.current_action = jnp.array(1)
+
+        elif self.down_pressed:
+            self.current_action = jnp.array(2)
+
+        elif self.left_pressed:
+            self.current_action = jnp.array(3)
+
+        elif self.right_pressed:
+            self.current_action = jnp.array(4)
+
+        elif self.fire_pressed:
+            self.current_action = jnp.array(5)
+
+        else:
+            self.current_action = jnp.array(0)
+
 
     # RUN
     def run(self):
