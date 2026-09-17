@@ -240,16 +240,20 @@ def draw_sprite(img, x, y, sprite, color):
     yy = jnp.arange(H)[:, None]
     xx = jnp.arange(W)[None, :]
     img_h, img_w, _ = img.shape
+
     y_pos = y + yy
     x_pos = x + xx
+
     valid_y = (y_pos >= 0) & (y_pos < img_h)
     valid_x = (x_pos >= 0) & (x_pos < img_w)
     valid = valid_y & valid_x & sprite
-    valid_expanded = valid[:, :, None]
-    color_expanded = color[None, None, :]
-    img_region = img[y_pos, x_pos]
-    masked_region = jnp.where(valid_expanded, color_expanded, img_region)
-    img = img.at[y_pos, x_pos].set(masked_region)
+
+    y_safe = jnp.clip(y_pos, 0, img_h - 1)
+    x_safe = jnp.clip(x_pos, 0, img_w - 1)
+
+    img_region = img[y_safe, x_safe]
+    masked = jnp.where(valid[..., None], color[None, None, :], img_region)
+    img = img.at[y_safe, x_safe].set(masked)
     return img
 
 
