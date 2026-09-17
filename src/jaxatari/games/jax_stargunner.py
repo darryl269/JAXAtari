@@ -1773,105 +1773,532 @@ def capture_sprites_from_ale(num_episodes=5, save_path="star_gunner_sprites.pkl"
 
 # Local preview (human play with keyboard)
 
+
 if __name__ == "__main__":
-    # capture_sprites_from_ale()
+    import jax
+    import gymnasium as gym
+    import ale_py
 
-    import matplotlib.pyplot as plt
-    import matplotlib.animation as animation
+    # Register ALE environments with Gymnasium
+    gym.register_envs(ale_py)
 
-    env = JaxStarGunner()
-    _, g_state = env.reset(jax.random.PRNGKey(0))
-    held = {"up": False, "down": False, "left": False, "right": False, "fire": False}
+    print("=" * 70)
+    print("STAR GUNNER - JAX vs ALE TEST")
+    print("=" * 70)
 
-    def action_idx():
-        u, d, l, r, f = (
-            held["up"],
-            held["down"],
-            held["left"],
-            held["right"],
-            held["fire"],
+    # ==================================================================
+    # TEST CONFIGURATION
+    # ==================================================================
+
+    SEED = 0
+
+    TEST_ACTIONS = [
+        0,   # NOOP
+        3,   # RIGHT
+        3,   # RIGHT
+        6,   # UP + RIGHT
+        1,   # FIRE
+        12,  # LEFT + FIRE
+        8,   # DOWN + RIGHT
+        5,   # DOWN
+        10,  # UP + FIRE
+        0,   # NOOP
+    ]
+
+    # ==================================================================
+    # JAX ACTION SET
+    # ==================================================================
+
+    print("\nJAX ACTION SET")
+    print("-" * 70)
+
+    for action_id, action in enumerate(JaxStarGunner.ACTION_SET):
+        print(
+            f"JAX action {action_id:2d} -> {int(action)}"
         )
-        # ---------------------------------------------------------
-        # Fire + diagonal
-        # ---------------------------------------------------------
-        if f and u and r:
-            return 14  # UPRIGHTFIRE
-        if f and u and l:
-            return 15  # UPLEFTFIRE
-        if f and d and r:
-            return 16  # DOWNRIGHTFIRE
-        if f and d and l:
-            return 17  # DOWNLEFTFIRE
-        # ---------------------------------------------------------
-        # Fire + cardinal direction
-        # ---------------------------------------------------------
-        if f and u:
-            return 10  # UPFIRE
-        if f and r:
-            return 11  # RIGHTFIRE
-        if f and l:
-            return 12  # LEFTFIRE
-        if f and d:
-            return 13  # DOWNFIRE
-        # ---------------------------------------------------------
-        # Fire only
-        # ---------------------------------------------------------
-        if f:
-            return 1  # FIRE
-        # ---------------------------------------------------------
-        # Diagonal movement
-        # ---------------------------------------------------------
-        if u and r:
-            return 6  # UPRIGHT
-        if u and l:
-            return 7  # UPLEFT
-        if d and r:
-            return 8  # DOWNRIGHT
-        if d and l:
-            return 9  # DOWNLEFT
-        # ---------------------------------------------------------
-        # Cardinal movement
-        # ---------------------------------------------------------
-        if u:
-            return 2
-        if r:
-            return 3
-        if l:
-            return 4
-        if d:
-            return 5
-        return 0  # NOOP
 
-    fig, ax = plt.subplots(figsize=(4, 5.25))
-    fig.patch.set_facecolor("black")
-    ax.set_facecolor("black")
-    ax.set_position([0, 0, 1, 1])
-    ax.axis("off")
-    im = ax.imshow(np.asarray(env.render(g_state)).astype(np.uint8), aspect="auto")
-
-    def on_press(e):
-        if e.key in ("up", "down", "left", "right"):
-            held[e.key] = True
-        elif e.key == " ":
-            held["fire"] = True
-
-    def on_release(e):
-        if e.key in ("up", "down", "left", "right"):
-            held[e.key] = False
-        elif e.key == " ":
-            held["fire"] = False
-
-    fig.canvas.mpl_connect("key_press_event", on_press)
-    fig.canvas.mpl_connect("key_release_event", on_release)
-
-    def update(_):
-        global g_state
-        _, g_state, _, _, _ = env.step(g_state, jnp.array(action_idx(), jnp.int32))
-        im.set_data(np.asarray(env.render(g_state)).astype(np.uint8))
-        return [im]
-
-    print("Arrow keys move, SPACE fires. Press SPACE on the title to start.")
-    _ani = animation.FuncAnimation(
-        fig, update, interval=33, blit=False, cache_frame_data=False
+    print(
+        "\nNumber of JAX actions:",
+        len(JaxStarGunner.ACTION_SET),
     )
-    plt.show()
+
+    # ==================================================================
+    # 1. JAX ENVIRONMENT
+    # ==================================================================
+
+    print("\n")
+    print("=" * 70)
+    print("1. JAX ENVIRONMENT")
+    print("=" * 70)
+
+    jax_env = JaxStarGunner(
+        StarGunnerConstants(
+            FRAMESKIP=1,
+            STICKY_ACTION_PROB=0.0,
+            DEATH_PENALTY=0.0,
+        ),
+        start_in_play=True,
+    )
+
+    key = jax.random.PRNGKey(SEED)
+
+    jax_obs, jax_state = jax_env.reset(key)
+
+    print("\nInitial JAX state")
+    print("-" * 70)
+    print("Score :", int(jax_state.score))
+    print("Lives :", int(jax_state.lives))
+    print("Wave  :", int(jax_state.wave))
+    print(
+        "Player:",
+        float(jax_state.player_x),
+        float(jax_state.player_y),
+    )
+
+    assert int(jax_state.score) == 0
+    assert int(jax_state.lives) == 3
+    assert int(jax_state.wave) == 1
+
+    print("\n✓ JAX reset test passed")
+
+    # ==================================================================
+    # 1.1 JAX NOOP TEST
+    # ==================================================================
+
+    jax_obs, jax_state2, jax_reward, jax_done, jax_info = (
+        jax_env.step(jax_state, 0)
+    )
+
+    print("\n--- JAX NOOP TEST ---")
+    print("Action :", 0)
+    print("Reward :", float(jax_reward))
+    print("Score  :", int(jax_state2.score))
+    print("Lives  :", int(jax_state2.lives))
+    print("Wave   :", int(jax_state2.wave))
+    print("Done   :", bool(jax_done))
+
+    assert float(jax_reward) == 0.0
+    assert int(jax_state2.score) == int(jax_state.score)
+    assert int(jax_state2.lives) == int(jax_state.lives)
+    assert int(jax_state2.wave) == int(jax_state.wave)
+    assert not bool(jax_done)
+
+    print("✓ JAX NOOP test passed")
+
+    # ==================================================================
+    # 2. JAX ACTION SEQUENCE
+    # ==================================================================
+
+    print("\n")
+    print("=" * 70)
+    print("2. JAX ACTION SEQUENCE")
+    print("=" * 70)
+
+    jax_state = jax_state2
+
+    jax_results = []
+
+    previous_score = int(jax_state.score)
+    previous_lives = int(jax_state.lives)
+    previous_wave = int(jax_state.wave)
+
+    for i, action in enumerate(TEST_ACTIONS):
+
+        (
+            jax_obs,
+            jax_state,
+            jax_reward,
+            jax_done,
+            jax_info,
+        ) = jax_env.step(jax_state, action)
+
+        current_score = int(jax_state.score)
+        current_lives = int(jax_state.lives)
+        current_wave = int(jax_state.wave)
+
+        score_delta = current_score - previous_score
+        lives_delta = current_lives - previous_lives
+        wave_delta = current_wave - previous_wave
+
+        print(
+            f"Step {i:02d} | "
+            f"Action={action:2d} | "
+            f"Reward={float(jax_reward):8.1f} | "
+            f"Score={current_score:5d} "
+            f"(Δ{score_delta:+4d}) | "
+            f"Lives={current_lives} "
+            f"(Δ{lives_delta:+2d}) | "
+            f"Wave={current_wave} "
+            f"(Δ{wave_delta:+2d}) | "
+            f"Done={bool(jax_done)}"
+        )
+
+        # Basic sanity checks
+        assert current_score >= previous_score
+        assert current_lives <= previous_lives
+
+        jax_results.append(
+            {
+                "step": i,
+                "action": action,
+                "reward": float(jax_reward),
+                "score": current_score,
+                "lives": current_lives,
+                "wave": current_wave,
+                "done": bool(jax_done),
+                "player_x": float(jax_state.player_x),
+                "player_y": float(jax_state.player_y),
+            }
+        )
+
+        previous_score = current_score
+        previous_lives = current_lives
+        previous_wave = current_wave
+
+        if bool(jax_done):
+            break
+
+    print("\n✓ JAX action sequence finished")
+
+    # ==================================================================
+    # 3. ALE ENVIRONMENT
+    # ==================================================================
+
+    print("\n")
+    print("=" * 70)
+    print("3. ALE ENVIRONMENT")
+    print("=" * 70)
+
+    try:
+
+        ale_env = gym.make(
+            "ALE/StarGunner-v5",
+            frameskip=1,
+            repeat_action_probability=0.0,
+        )
+
+        # --------------------------------------------------------------
+        # ALE RESET
+        # --------------------------------------------------------------
+
+        ale_obs, ale_info = ale_env.reset(seed=SEED)
+
+        print("\nInitial ALE state")
+        print("-" * 70)
+        print("Observation shape:", ale_obs.shape)
+        print("Observation dtype:", ale_obs.dtype)
+
+        # --------------------------------------------------------------
+        # ALE ACTION SPACE
+        # --------------------------------------------------------------
+
+        print("\nALE action space")
+        print("-" * 70)
+        print("Action space   :", ale_env.action_space)
+        print("Number actions :", ale_env.action_space.n)
+
+        assert ale_env.action_space.n == len(
+            JaxStarGunner.ACTION_SET
+        )
+
+        print("\n✓ JAX and ALE both have 18 actions")
+
+        # --------------------------------------------------------------
+        # ALE ACTION MEANINGS
+        # --------------------------------------------------------------
+
+        print("\nALE action meanings")
+        print("-" * 70)
+
+        action_meanings = ale_env.unwrapped.get_action_meanings()
+
+        for action_id, meaning in enumerate(action_meanings):
+            print(
+                f"ALE action {action_id:2d} -> {meaning}"
+            )
+
+        # --------------------------------------------------------------
+        # JAX ACTION MEANINGS
+        # --------------------------------------------------------------
+
+        print("\nJAX action meanings")
+        print("-" * 70)
+
+        jax_action_names = [
+            "NOOP",
+            "FIRE",
+            "UP",
+            "RIGHT",
+            "LEFT",
+            "DOWN",
+            "UPRIGHT",
+            "UPLEFT",
+            "DOWNRIGHT",
+            "DOWNLEFT",
+            "UPFIRE",
+            "RIGHTFIRE",
+            "LEFTFIRE",
+            "DOWNFIRE",
+            "UPRIGHTFIRE",
+            "UPLEFTFIRE",
+            "DOWNRIGHTFIRE",
+            "DOWNLEFTFIRE",
+        ]
+
+        for action_id, name in enumerate(jax_action_names):
+            print(
+                f"JAX action {action_id:2d} -> {name}"
+            )
+
+        # --------------------------------------------------------------
+        # ACTION SPACE COMPARISON
+        # --------------------------------------------------------------
+
+        print("\n")
+        print("=" * 70)
+        print("4. ACTION SPACE COMPARISON")
+        print("=" * 70)
+
+        print(
+            f"{'ID':>4} | "
+            f"{'JAX':<18} | "
+            f"{'ALE':<18} | "
+            f"{'MATCH':<8}"
+        )
+
+        print("-" * 70)
+
+        action_mapping_matches = True
+
+        for action_id in range(len(jax_action_names)):
+
+            jax_name = jax_action_names[action_id]
+            ale_name = action_meanings[action_id]
+
+            # Normalize ALE naming
+            ale_name_normalized = ale_name.upper()
+
+            match = (
+                jax_name.upper()
+                == ale_name_normalized
+            )
+
+            if not match:
+                action_mapping_matches = False
+
+            print(
+                f"{action_id:4d} | "
+                f"{jax_name:<18} | "
+                f"{ale_name:<18} | "
+                f"{'✓' if match else '✗':<8}"
+            )
+
+        if action_mapping_matches:
+            print(
+                "\n✓ JAX and ALE action mappings match"
+            )
+        else:
+            print(
+                "\n⚠ JAX and ALE action mappings differ"
+            )
+
+        # --------------------------------------------------------------
+        # ALE NOOP TEST
+        # --------------------------------------------------------------
+
+        ale_obs, ale_reward, ale_terminated, ale_truncated, ale_info = (
+            ale_env.step(0)
+        )
+
+        ale_done = ale_terminated or ale_truncated
+
+        print("\n--- ALE NOOP TEST ---")
+        print("Action :", 0)
+        print("Reward :", float(ale_reward))
+        print("Done   :", bool(ale_done))
+
+        # --------------------------------------------------------------
+        # ALE ACTION SEQUENCE
+        # --------------------------------------------------------------
+
+        print("\n")
+        print("=" * 70)
+        print("5. ALE ACTION SEQUENCE")
+        print("=" * 70)
+
+        ale_results = []
+
+        ale_cumulative_reward = 0.0
+
+        for i, action in enumerate(TEST_ACTIONS):
+
+            (
+                ale_obs,
+                ale_reward,
+                ale_terminated,
+                ale_truncated,
+                ale_info,
+            ) = ale_env.step(action)
+
+            ale_done = ale_terminated or ale_truncated
+
+            ale_reward = float(ale_reward)
+
+            ale_cumulative_reward += ale_reward
+
+            print(
+                f"Step {i:02d} | "
+                f"Action={action:2d} | "
+                f"Reward={ale_reward:8.1f} | "
+                f"Cumulative={ale_cumulative_reward:8.1f} | "
+                f"Done={bool(ale_done)}"
+            )
+
+            ale_results.append(
+                {
+                    "step": i,
+                    "action": action,
+                    "reward": ale_reward,
+                    "done": bool(ale_done),
+                }
+            )
+
+            if ale_done:
+                break
+
+        print("\n✓ ALE action sequence finished")
+
+        # --------------------------------------------------------------
+        # FINAL COMPARISON
+        # --------------------------------------------------------------
+
+        print("\n")
+        print("=" * 70)
+        print("6. JAX vs ALE COMPARISON")
+        print("=" * 70)
+
+        print(
+            f"{'Step':>4} | "
+            f"{'Action':>6} | "
+            f"{'JAX Reward':>12} | "
+            f"{'ALE Reward':>12} | "
+            f"{'Difference':>12}"
+        )
+
+        print("-" * 70)
+
+        max_reward_difference = 0.0
+
+        comparison_length = min(
+            len(jax_results),
+            len(ale_results),
+        )
+
+        for i in range(comparison_length):
+
+            jax_result = jax_results[i]
+            ale_result = ale_results[i]
+
+            jax_reward = jax_result["reward"]
+            ale_reward = ale_result["reward"]
+
+            difference = jax_reward - ale_reward
+
+            max_reward_difference = max(
+                max_reward_difference,
+                abs(difference),
+            )
+
+            print(
+                f"{i:4d} | "
+                f"{jax_result['action']:6d} | "
+                f"{jax_reward:12.1f} | "
+                f"{ale_reward:12.1f} | "
+                f"{difference:12.1f}"
+            )
+
+        # --------------------------------------------------------------
+        # SUMMARY
+        # --------------------------------------------------------------
+
+        print("\n")
+        print("=" * 70)
+        print("7. SUMMARY")
+        print("=" * 70)
+
+        print(
+            "JAX action count :",
+            len(JaxStarGunner.ACTION_SET),
+        )
+
+        print(
+            "ALE action count :",
+            ale_env.action_space.n,
+        )
+
+        print(
+            "Action mapping   :",
+            "MATCH" if action_mapping_matches else "DIFFERENT",
+        )
+
+        print(
+            "JAX final score  :",
+            jax_results[-1]["score"]
+            if jax_results
+            else 0,
+        )
+
+        print(
+            "ALE cumulative reward:",
+            ale_cumulative_reward,
+        )
+
+        print(
+            "Max reward difference:",
+            max_reward_difference,
+        )
+
+        print("\nImportant:")
+        print(
+            "Different JAX/ALE rewards are expected at this stage "
+            "because the JAX implementation is a custom reimplementation."
+        )
+
+        print(
+            "The purpose of this test is first to verify the action "
+            "space and basic environment behavior."
+        )
+
+        ale_env.close()
+
+        print("\n✓ ALE test finished successfully")
+
+    except Exception as e:
+
+        print("\n")
+        print("=" * 70)
+        print("ALE TEST FAILED")
+        print("=" * 70)
+
+        print(
+            type(e).__name__,
+            ":",
+            str(e),
+        )
+
+        print(
+            "\nMake sure ALE/Gymnasium is installed and "
+            "ALE/StarGunner-v5 is available."
+        )
+
+        raise
+
+    # ==================================================================
+    # FINAL RESULT
+    # ==================================================================
+
+    print("\n")
+    print("=" * 70)
+    print("TEST COMPLETED")
+    print("=" * 70)
+
