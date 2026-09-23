@@ -25,11 +25,32 @@ SQUEEZER = 2
 
 # Enemy properties (must match extracted sprites)
 
-ENEMY_POINTS = jnp.array([50, 100, 150], dtype=jnp.int32)
+# ENEMY_POINTS entfaellt - Punkte haengen von der Subwave ab (100/200/300), nicht vom Typ
+SUBWAVE_KILL_TARGET = jnp.array([10, 20, 30], jnp.int32)   # Kills pro Subwave (Anleitung, gesichert)
+SUBWAVE_CONCURRENT = jnp.array([1, 2, 3], jnp.int32)       # gleichzeitig aktive Gegner (Anleitung, gesichert)
+
+ENEMY_EMPTY = 0
+ENEMY_ALIVE = 1
+ENEMY_EXPLODING = 2
+ENEMY_REFORMING = 3
+
+
+def wave_bonus_for_level(level):
+    base = jnp.array([400, 600, 1000, 1100], jnp.int32)
+    cycle = (level - 1) % 4
+    group = (level - 1) // 4
+    return base[cycle] + 1000 * group
+
 ENEMY_W = jnp.array([8, 8, 8], dtype=jnp.float32)  # width of each enemy sprite
 ENEMY_H = jnp.array([4, 4, 4], dtype=jnp.float32)  # height of each enemy sprite
-ENEMY_COLOR = jnp.array([[255, 90, 0], [255, 180, 40], [200, 60, 200]], jnp.uint8)
-
+ENEMY_COLOR = jnp.array(
+    [
+        [236, 200, 96],   # SAUCER  – gelblich/orange
+        [180, 100, 220],  # BUZZIE  – violett
+        [110, 210, 110],  # SQUEEZER – grün
+    ],
+    jnp.uint8,
+)
 # SPRITE DEFINITIONS – placeholder until we extract exact data from ALE
 # To get perfect sprites, run capture_sprites_from_ale()
 # and replace the arrays below with the cropped binary data.
@@ -94,7 +115,6 @@ BOBO_SPRITE = jnp.array(
 class StarGunnerConstants(struct.PyTreeNode):
     WIDTH: int = struct.field(pytree_node=False, default=160)
     HEIGHT: int = struct.field(pytree_node=False, default=210)
-    DIFFICULTY: int = struct.field(pytree_node=False, default=0)
 
     FRAMESKIP: int = struct.field(pytree_node=False, default=4)
     STICKY_ACTION_PROB: float = struct.field(
@@ -102,6 +122,10 @@ class StarGunnerConstants(struct.PyTreeNode):
         default=0.25,
     )
 
+    MOD_ID: int = struct.field(pytree_node=False, default=0)
+    # 0 = Basisspiel, 1-6 = einfache Mods, 7-10 = komplexe Mods
+
+    MAX_EPISODE_FRAMES: int = struct.field(pytree_node=False, default=108_000)
     PLAY_TOP: int = struct.field(pytree_node=False, default=24)
     PLAY_BOTTOM: int = struct.field(pytree_node=False, default=170)
     HILL_Y: int = struct.field(pytree_node=False, default=193)
@@ -111,7 +135,9 @@ class StarGunnerConstants(struct.PyTreeNode):
     PLAYER_SPEED: int = struct.field(pytree_node=False, default=2)
     PLAYER_START_X: int = struct.field(pytree_node=False, default=20)
     PLAYER_START_Y: int = struct.field(pytree_node=False, default=100)
-    PLAYER_LIVES_START: int = struct.field(pytree_node=False, default=3)
+    PLAYER_LIVES_START: int = struct.field(pytree_node=False, default=5)
+    EXTRA_LIFE_THRESHOLD: int = struct.field(pytree_node=False, default=10_000)
+    MAX_LIVES: int = struct.field(pytree_node=False, default=255)
     INVULN_FRAMES: int = struct.field(pytree_node=False, default=60)
 
     BULLET_WIDTH: int = struct.field(pytree_node=False, default=4)
@@ -120,18 +146,12 @@ class StarGunnerConstants(struct.PyTreeNode):
     MAX_BULLETS: int = struct.field(pytree_node=False, default=2)
     FIRE_COOLDOWN: int = struct.field(pytree_node=False, default=8)
 
-    NUM_ENEMIES: int = struct.field(pytree_node=False, default=6)
+    REFORM_FRAMES: int = struct.field(pytree_node=False, default=20)
+    NUM_ENEMIES: int = struct.field(pytree_node=False, default=3)
     ENEMY_SPEED: float = struct.field(pytree_node=False, default=1.0)
     ENEMY_SPEED_INCREMENT: float = struct.field(pytree_node=False, default=0.10)
     MAX_ENEMY_SPEED_MULTIPLIER: float = struct.field(pytree_node=False, default=2.0)
     ENEMY_AMP: float = struct.field(pytree_node=False, default=8.0)
-    WAVE_BONUS: int = struct.field(pytree_node=False, default=1000)
-    # Time between spawning a new wave and starting movement
-    WAVE_START_DELAY: int = struct.field(pytree_node=False, default=30)
-
-    ENEMY_SPAWN_Y: int = struct.field(pytree_node=False, default=60)
-    ENEMY_SPAWN_SPACING: int = struct.field(pytree_node=False, default=20)
-    HIT_TOP_MARGIN: int = struct.field(pytree_node=False, default=0)
 
     BOBO_WIDTH: int = struct.field(pytree_node=False, default=8)
     BOBO_HEIGHT: int = struct.field(pytree_node=False, default=4)
@@ -144,6 +164,7 @@ class StarGunnerConstants(struct.PyTreeNode):
     BOMB_HEIGHT: int = struct.field(pytree_node=False, default=4)
     BOMB_SPEED: float = struct.field(pytree_node=False, default=2.0)
 
+    ENEMY_COLOR_SAUCER: tuple = struct.field(pytree_node=False, default=(236, 200, 96))
     HILL_SCROLL_SPEED: float = struct.field(pytree_node=False, default=0.85)
 
     EXPLOSION_SIZE: int = struct.field(pytree_node=False, default=10)
@@ -152,7 +173,6 @@ class StarGunnerConstants(struct.PyTreeNode):
     DEATH_PENALTY: float = struct.field(pytree_node=False, default=0.0)
     PLAYER_EXPLOSION_SIZE: int = struct.field(pytree_node=False, default=14)
     PLAYER_EXPLOSION_DURATION: int = struct.field(pytree_node=False, default=16)
-
 
 # State structure
 
@@ -172,7 +192,6 @@ class StarGunnerState(struct.PyTreeNode):
 
     bullet_x: chex.Array
     bullet_y: chex.Array
-    bullet_dir: chex.Array
     bullet_vx: chex.Array
     bullet_vy: chex.Array
     bullet_active: chex.Array
@@ -183,7 +202,6 @@ class StarGunnerState(struct.PyTreeNode):
     enemy_type: chex.Array
     enemy_vy: chex.Array
     enemy_phase: chex.Array
-    enemy_alive: chex.Array
 
     bobo_x: chex.Array
     bobo_vx: chex.Array
@@ -201,12 +219,16 @@ class StarGunnerState(struct.PyTreeNode):
     player_explosion_timer: chex.Array
     player_explosion_active: chex.Array
 
+    enemy_state: chex.Array
+    enemy_timer: chex.Array
+    level: chex.Array
+    subwave: chex.Array
+    kills_in_subwave: chex.Array
     score: chex.Array
     lives: chex.Array
-    wave: chex.Array
-    wave_timer: chex.Array
     invuln_timer: chex.Array
-
+    respawn_timer: chex.Array
+    extra_lives_earned: chex.Array
 
 class StarGunnerObservation(struct.PyTreeNode):
     player: ObjectObservation
@@ -220,7 +242,6 @@ class StarGunnerInfo(struct.PyTreeNode):
     time: jnp.ndarray
     lives: jnp.ndarray
     wave: jnp.ndarray
-
 
 # Raster drawing helpers
 
@@ -260,6 +281,9 @@ def draw_sprite(img, x, y, sprite, color):
 def _aabb_overlap(ax, ay, aw, ah, bx, by, bw, bh):
     return (ax < bx + bw) & (ax + aw > bx) & (ay < by + bh) & (ay + ah > by)
 
+def enemy_display_y(enemy_y, enemy_type, enemy_phase, step_counter, amp):
+    bob = amp * jnp.sin(enemy_phase + step_counter.astype(jnp.float32) * 0.1)
+    return enemy_y + jnp.where(enemy_type == SAUCER, bob, 0.0)
 
 # 5x7 pixel font (used for HUD and attract screen)
 
@@ -293,7 +317,6 @@ _FONT = {
     " ": ["00000", "00000", "00000", "00000", "00000", "00000", "00000"],
     "(": ["01110", "10001", "10110", "10100", "10110", "10001", "01110"],
 }
-
 
 def _glyph_np(ch):
     rows = _FONT.get(ch, _FONT[" "])
@@ -350,7 +373,7 @@ class JaxStarGunner(
         dtype=jnp.int32,
     )
 
-    def __init__(self, consts: StarGunnerConstants = None, start_in_play: bool = False):
+    def __init__(self, consts: StarGunnerConstants = None, start_in_play: bool = True):
         consts = consts or StarGunnerConstants()
         super().__init__(consts)
         self.start_in_play = start_in_play
@@ -369,99 +392,33 @@ class JaxStarGunner(
             | (a == Action.DOWNLEFTFIRE)
         )
 
-    def _spawn_wave(self, key, wave):
-        """
-        Create a deterministic enemy formation.
-
-        Enemy positions are based on the wave number instead of
-        being completely random.
-        """
-
+    def _init_subwave(self, level, subwave):
         n = self.consts.NUM_ENEMIES
         idx = jnp.arange(n)
+        concurrent = SUBWAVE_CONCURRENT[subwave]
+        active = idx < concurrent
 
-        # ---------------------------------------------------------
-        # Horizontal spawn positions
-        # ---------------------------------------------------------
+        row_spacing = (self.consts.PLAY_BOTTOM - self.consts.PLAY_TOP - 20) / n
+        y = self.consts.PLAY_TOP + 10 + idx.astype(jnp.float32) * row_spacing
 
-        spacing = self.consts.WIDTH / (n + 1)
+        # Einflug von rechts - Designentscheidung, Anleitung nennt keine exakte Startposition
+        x = jnp.full((n,), jnp.float32(self.consts.WIDTH))
 
-        x = (idx.astype(jnp.float32) + 1.0) * spacing
-
-        # ---------------------------------------------------------
-        # Vertical formation
-        # ---------------------------------------------------------
-
-        row = idx % 3
-
-        y = (
-            self.consts.ENEMY_SPAWN_Y
-            + row.astype(jnp.float32) * self.consts.ENEMY_SPAWN_SPACING
-        )
-
-        # Keep enemies inside play area
-        y = jnp.clip(
-            y,
-            self.consts.PLAY_TOP + 4,
-            self.consts.PLAY_BOTTOM - 12,
-        )
-
-        # ---------------------------------------------------------
-        # Enemy type
-        # ---------------------------------------------------------
-        type_pattern = jnp.array(
-            [
-                SAUCER,
-                BUZZIE,
-                SQUEEZER,
-                SAUCER,
-                BUZZIE,
-                SQUEEZER,
-            ],
-            dtype=jnp.int32,
-        )
-
-        type_index = jnp.mod(
-            idx + wave - 1,
-            3,
-        )
-
-        enemy_type = type_index.astype(jnp.int32)
-
-        # ---------------------------------------------------------
-        # Vertical movement
-        # ---------------------------------------------------------
-
-        direction = jnp.where(
-            idx % 2 == 0,
-            1.0,
-            -1.0,
-        )
-
-        enemy_vy = jnp.where(
-            enemy_type == BUZZIE,
-            direction * 0.6,
-            0.0,
-        )
-
-        # ---------------------------------------------------------
-        # Animation phase
-        # ---------------------------------------------------------
-
+        type_index = jnp.mod(idx + level - 1, 3).astype(jnp.int32)
+        direction = jnp.where(idx % 2 == 0, 1.0, -1.0)
+        vy = jnp.where(type_index == BUZZIE, direction * 0.6, 0.0)
         phase = idx.astype(jnp.float32) * (2.0 * jnp.pi / n)
 
-        return (
-            x,
-            y,
-            enemy_type,
-            enemy_vy,
-            phase,
-        )
+        enemy_state = jnp.where(active, ENEMY_ALIVE, ENEMY_EMPTY)
+
+        return x, y, type_index, vy, phase, enemy_state
 
     def _fresh_game_fields(self, key):
         n = self.consts.NUM_ENEMIES
-        key, wkey = jax.random.split(key)
-        ex, ey, et, evy, eph = self._spawn_wave(wkey, jnp.array(1, jnp.int32))
+        ex, ey, et, evy, eph, est = self._init_subwave(
+            jnp.array(1, jnp.int32), jnp.array(0, jnp.int32)
+        )
+
         start_x = jnp.array(self.consts.PLAYER_START_X, jnp.float32)
         start_y = jnp.array(self.consts.PLAYER_START_Y, jnp.float32)
         return dict(
@@ -474,7 +431,6 @@ class JaxStarGunner(
             previous_action=jnp.array(0, jnp.int32),
             bullet_x=jnp.zeros((self.consts.MAX_BULLETS,), jnp.float32),
             bullet_y=jnp.zeros((self.consts.MAX_BULLETS,), jnp.float32),
-            bullet_dir=jnp.ones((self.consts.MAX_BULLETS,), jnp.float32),
             bullet_vx=jnp.zeros((self.consts.MAX_BULLETS,), jnp.float32),
             bullet_vy=jnp.zeros((self.consts.MAX_BULLETS,), jnp.float32),
             bullet_active=jnp.zeros((self.consts.MAX_BULLETS,), jnp.bool_),
@@ -484,7 +440,12 @@ class JaxStarGunner(
             enemy_type=et,
             enemy_vy=evy,
             enemy_phase=eph,
-            enemy_alive=jnp.ones((n,), jnp.bool_),
+            enemy_state=est,
+            enemy_timer=jnp.zeros((n,), jnp.int32),
+            level=jnp.array(1, jnp.int32),
+            subwave=jnp.array(0, jnp.int32),
+            kills_in_subwave=jnp.array(0, jnp.int32),
+            extra_lives_earned=jnp.array(0, jnp.int32),
             bobo_x=jnp.array(self.consts.WIDTH / 2, jnp.float32),
             bobo_vx=jnp.array(self.consts.BOBO_SPEED, jnp.float32),
             bomb_x=jnp.zeros((self.consts.MAX_BOMBS,), jnp.float32),
@@ -500,9 +461,8 @@ class JaxStarGunner(
             player_explosion_active=jnp.array(False, jnp.bool_),
             score=jnp.array(0, jnp.int32),
             lives=jnp.array(self.consts.PLAYER_LIVES_START, jnp.int32),
-            wave=jnp.array(1, jnp.int32),
-            wave_timer=jnp.array(0, jnp.int32),
             invuln_timer=jnp.array(0, jnp.int32),
+            respawn_timer=jnp.array(0, jnp.int32),
         )
 
     def _apply_sticky_action(self, state, action):
@@ -742,14 +702,6 @@ class JaxStarGunner(
 
         bvy = state.bullet_vy.at[free].set(vy)
 
-        bd = state.bullet_dir.at[free].set(
-            jnp.where(
-                vx >= 0,
-                1.0,
-                -1.0,
-            )
-        )
-
         ba = state.bullet_active.at[free].set(True)
 
         bullet_x = jnp.where(
@@ -774,12 +726,6 @@ class JaxStarGunner(
             can_fire,
             bvy,
             state.bullet_vy,
-        )
-
-        bullet_dir = jnp.where(
-            can_fire,
-            bd,
-            state.bullet_dir,
         )
 
         bullet_active = jnp.where(
@@ -824,7 +770,6 @@ class JaxStarGunner(
         return state.replace(
             bullet_x=bullet_x,
             bullet_y=bullet_y,
-            bullet_dir=bullet_dir,
             bullet_vx=bullet_vx,
             bullet_vy=bullet_vy,
             bullet_active=bullet_active,
@@ -832,48 +777,28 @@ class JaxStarGunner(
         )
 
     def _enemy_display_y(self, state):
-        bob = self.consts.ENEMY_AMP * jnp.sin(
-            state.enemy_phase + state.step_counter.astype(jnp.float32) * 0.1
+        return enemy_display_y(
+            state.enemy_y, state.enemy_type, state.enemy_phase,
+            state.step_counter, self.consts.ENEMY_AMP,
         )
-        return state.enemy_y + jnp.where(state.enemy_type == SAUCER, bob, 0.0)
 
     def _enemy_step(self, state):
-        wave_multiplier = 1.0 + (
-            self.consts.ENEMY_SPEED_INCREMENT * (state.wave - 1).astype(jnp.float32)
-        )
-
         wave_multiplier = jnp.minimum(
-            wave_multiplier,
+            1.0 + self.consts.ENEMY_SPEED_INCREMENT * (state.level - 1).astype(jnp.float32),
             self.consts.MAX_ENEMY_SPEED_MULTIPLIER,
         )
-
         speed = self.consts.ENEMY_SPEED * wave_multiplier
+        is_alive = state.enemy_state == ENEMY_ALIVE
 
-        nx = (state.enemy_x - speed) % self.consts.WIDTH
-
-        ny = state.enemy_y + state.enemy_vy
+        nx = jnp.where(is_alive, (state.enemy_x - speed) % self.consts.WIDTH, state.enemy_x)
 
         lo = float(self.consts.PLAY_TOP + 4)
-
         hi = float(self.consts.PLAY_BOTTOM - 12)
+        ny = state.enemy_y + jnp.where(is_alive, state.enemy_vy, 0.0)
+        bounce = ((ny < lo) | (ny > hi)) & is_alive
+        nvy = jnp.where(bounce, -state.enemy_vy, state.enemy_vy)
 
-        bounce = (ny < lo) | (ny > hi)
-
-        nvy = jnp.where(
-            bounce,
-            -state.enemy_vy,
-            state.enemy_vy,
-        )
-
-        return state.replace(
-            enemy_x=nx,
-            enemy_y=jnp.clip(
-                ny,
-                lo,
-                hi,
-            ),
-            enemy_vy=nvy,
-        )
+        return state.replace(enemy_x=nx, enemy_y=jnp.clip(ny, lo, hi), enemy_vy=nvy)
 
     def _bobo_step(self, state):
         nx = state.bobo_x + state.bobo_vx
@@ -950,90 +875,85 @@ class JaxStarGunner(
     def _resolve_collisions(self, state):
         edy = self._enemy_display_y(state)
         ew, eh = ENEMY_W[state.enemy_type], ENEMY_H[state.enemy_type]
+        is_alive = state.enemy_state == ENEMY_ALIVE
 
         def row(bx, by, active):
             return (
-                _aabb_overlap(
-                    bx,
-                    by,
-                    self.consts.BULLET_WIDTH,
-                    self.consts.BULLET_HEIGHT,
-                    state.enemy_x,
-                    edy,
-                    ew,
-                    eh,
-                )
-                & active
-                & state.enemy_alive
+                    _aabb_overlap(bx, by, self.consts.BULLET_WIDTH, self.consts.BULLET_HEIGHT,
+                                  state.enemy_x, edy, ew, eh)
+                    & active & is_alive
             )
 
         hits = jax.vmap(row)(state.bullet_x, state.bullet_y, state.bullet_active)
         enemy_hit = jnp.any(hits, axis=0)
         bullet_used = jnp.any(hits, axis=1)
-        gained = jnp.sum(jnp.where(enemy_hit, ENEMY_POINTS[state.enemy_type], 0))
+
+        vulnerable = state.invuln_timer <= 0
+        reforming_danger = (state.enemy_state == ENEMY_REFORMING) & (state.enemy_timer == 1)
+        dangerous = is_alive | reforming_danger
+
+        enemy_touch_mask = (
+                _aabb_overlap(state.player_x, state.player_y, self.consts.PLAYER_WIDTH,
+                              self.consts.PLAYER_HEIGHT, state.enemy_x, edy, ew, eh)
+                & dangerous
+        )
+        enemy_touch = jnp.any(enemy_touch_mask)
+
+        # Kollisions-Kill: "crashing head-on into an alien" zerstoert den Gegner mit
+        collision_kill = enemy_touch_mask & vulnerable & is_alive
+        enemy_hit = enemy_hit | collision_kill
+
+        points_per_kill = ((state.subwave + 1) * 100).astype(jnp.int32)
+        gained = jnp.sum(jnp.where(enemy_hit, points_per_kill, 0))
+        new_kills = state.kills_in_subwave + jnp.sum(enemy_hit.astype(jnp.int32))
+
+        new_enemy_state = jnp.where(enemy_hit, ENEMY_EXPLODING, state.enemy_state)
+        new_enemy_timer = jnp.where(enemy_hit, self.consts.EXPLOSION_DURATION, state.enemy_timer)
 
         exp_active = state.explosion_active | enemy_hit
-        exp_timer = jnp.where(
-            enemy_hit, self.consts.EXPLOSION_DURATION, state.explosion_timer
-        )
+        exp_timer = jnp.where(enemy_hit, self.consts.EXPLOSION_DURATION, state.explosion_timer)
         exp_x = jnp.where(enemy_hit, state.enemy_x, state.explosion_x)
         exp_y = jnp.where(enemy_hit, edy, state.explosion_y)
 
-        new_alive = state.enemy_alive & (~enemy_hit)
-        vulnerable = state.invuln_timer <= 0
-        enemy_touch = jnp.any(
-            _aabb_overlap(
-                state.player_x,
-                state.player_y,
-                self.consts.PLAYER_WIDTH,
-                self.consts.PLAYER_HEIGHT,
-                state.enemy_x,
-                edy,
-                ew,
-                eh,
-            )
-            & new_alive
-        )
         bomb_each = (
-            _aabb_overlap(
-                state.player_x,
-                state.player_y,
-                self.consts.PLAYER_WIDTH,
-                self.consts.PLAYER_HEIGHT,
-                state.bomb_x,
-                state.bomb_y,
-                self.consts.BOMB_WIDTH,
-                self.consts.BOMB_HEIGHT,
-            )
-            & state.bomb_active
+                _aabb_overlap(state.player_x, state.player_y, self.consts.PLAYER_WIDTH,
+                              self.consts.PLAYER_HEIGHT, state.bomb_x, state.bomb_y,
+                              self.consts.BOMB_WIDTH, self.consts.BOMB_HEIGHT)
+                & state.bomb_active
         )
         damaged = vulnerable & (enemy_touch | jnp.any(bomb_each))
 
+
         p_exp_active = state.player_explosion_active | damaged
-        p_exp_timer = jnp.where(
-            damaged,
-            self.consts.PLAYER_EXPLOSION_DURATION,
-            jnp.maximum(state.player_explosion_timer - 1, 0),
-        )
+        p_exp_timer = jnp.where(damaged, self.consts.PLAYER_EXPLOSION_DURATION,
+                                jnp.maximum(state.player_explosion_timer - 1, 0))
         p_exp_active = p_exp_active & (p_exp_timer > 0)
         p_exp_x = jnp.where(damaged, state.player_x, state.player_explosion_x)
         p_exp_y = jnp.where(damaged, state.player_y, state.player_explosion_y)
 
-        px = jnp.where(damaged, jnp.float32(self.consts.PLAYER_START_X), state.player_x)
-        py = jnp.where(damaged, jnp.float32(self.consts.PLAYER_START_Y), state.player_y)
+        respawn_timer = jnp.where(damaged, self.consts.PLAYER_EXPLOSION_DURATION,
+                                  jnp.maximum(state.respawn_timer - 1, 0))
+
+        new_score = state.score + gained
+        should_have = new_score // self.consts.EXTRA_LIFE_THRESHOLD
+        new_extra = jnp.minimum(should_have, self.consts.MAX_LIVES - self.consts.PLAYER_LIVES_START)
+        gained_lives = jnp.maximum(new_extra - state.extra_lives_earned, 0)
 
         return (
             state.replace(
-                score=state.score + gained,
-                lives=jnp.maximum(0, state.lives - damaged.astype(jnp.int32)),
-                invuln_timer=jnp.where(
-                    damaged, self.consts.INVULN_FRAMES, state.invuln_timer
+                score=new_score,
+                lives=jnp.minimum(
+                    self.consts.MAX_LIVES,
+                    jnp.maximum(0, state.lives - damaged.astype(jnp.int32)) + gained_lives,
                 ),
-                enemy_alive=new_alive,
+                extra_lives_earned=state.extra_lives_earned + gained_lives,
+                invuln_timer=jnp.where(damaged, self.consts.INVULN_FRAMES, state.invuln_timer),
+                respawn_timer=respawn_timer,
+                enemy_state=new_enemy_state,
+                enemy_timer=new_enemy_timer,
+                kills_in_subwave=new_kills,
                 bullet_active=state.bullet_active & (~bullet_used),
                 bomb_active=state.bomb_active & (~(bomb_each & damaged)),
-                player_x=px,
-                player_y=py,
                 explosion_active=exp_active,
                 explosion_timer=exp_timer,
                 explosion_x=exp_x,
@@ -1046,99 +966,60 @@ class JaxStarGunner(
             damaged,
         )
 
-    def _wave_step(self, state):
-        """
-        Start a new wave after all enemies are destroyed.
+    def _enemy_lifecycle_step(self, state):
+        n = self.consts.NUM_ENEMIES
+        timer = jnp.maximum(state.enemy_timer - 1, 0)
 
-        A short delay is inserted between waves.
-        """
+        finished_explosion = (state.enemy_state == ENEMY_EXPLODING) & (timer == 0)
+        finished_reform = (state.enemy_state == ENEMY_REFORMING) & (timer == 0)
 
-        all_dead = jnp.all(~state.enemy_alive)
+        target = SUBWAVE_KILL_TARGET[state.subwave]
+        quota_reached = state.kills_in_subwave >= target
 
-        # ---------------------------------------------------------
-        # Wave timer
-        # ---------------------------------------------------------
-        timer_running = state.wave_timer > 0
+        goes_to_reform = finished_explosion & (~quota_reached)
+        goes_empty = finished_explosion & quota_reached
 
-        new_timer = jnp.maximum(
-            state.wave_timer - 1,
-            0,
-        )
+        new_enemy_state = state.enemy_state
+        new_enemy_state = jnp.where(goes_to_reform, ENEMY_REFORMING, new_enemy_state)
+        new_enemy_state = jnp.where(goes_empty, ENEMY_EMPTY, new_enemy_state)
+        new_enemy_state = jnp.where(finished_reform, ENEMY_ALIVE, new_enemy_state)
 
-        # ---------------------------------------------------------
-        # Start next wave
-        # ---------------------------------------------------------
-        start_next_wave = all_dead & ~timer_running & (state.lives > 0)
+        new_timer = jnp.where(goes_to_reform, self.consts.REFORM_FRAMES, timer)
 
-        next_wave = state.wave + start_next_wave.astype(jnp.int32)
-        # ---------------------------------------------------------
-        # Generate next formation
-        # ---------------------------------------------------------
-        key, spawn_key = jax.random.split(state.key)
-        ex, ey, et, evy, eph = self._spawn_wave(
-            spawn_key,
-            next_wave,
-        )
-        # ---------------------------------------------------------
-        # First detect wave completion
-        # ---------------------------------------------------------
-        new_wave_timer = jnp.where(
-            start_next_wave,
-            self.consts.WAVE_START_DELAY,
-            new_timer,
-        )
-        # ---------------------------------------------------------
-        # Spawn enemies only after the delay
-        # ---------------------------------------------------------
-        spawn_enemies = all_dead & (state.wave_timer == 1)
+        slot_idx = jnp.arange(n)
+        concurrent = SUBWAVE_CONCURRENT[state.subwave]
+        all_slots_done = jnp.all((new_enemy_state == ENEMY_EMPTY) | (slot_idx >= concurrent))
+        subwave_complete = quota_reached & all_slots_done
 
-        # ---------------------------------------------------------
-        # Wave bonus
-        # ---------------------------------------------------------
-        wave_bonus = jnp.where(
-            start_next_wave,
-            self.consts.WAVE_BONUS,
-            0,
-        )
+        bonus = jnp.where(subwave_complete, wave_bonus_for_level(state.level), 0)
+
+        next_subwave = jnp.where(subwave_complete, (state.subwave + 1) % 3, state.subwave)
+        level_up = subwave_complete & (state.subwave == 2)
+        next_level = state.level + level_up.astype(jnp.int32)
+
+        ex, ey, et, evy, eph, est = self._init_subwave(next_level, next_subwave)
+
+        final_enemy_state = jnp.where(subwave_complete, est, new_enemy_state)
+        final_x = jnp.where(subwave_complete, ex, state.enemy_x)
+        final_y = jnp.where(subwave_complete, ey, state.enemy_y)
+        final_type = jnp.where(subwave_complete, et, state.enemy_type)
+        final_vy = jnp.where(subwave_complete, evy, state.enemy_vy)
+        final_phase = jnp.where(subwave_complete, eph, state.enemy_phase)
+        final_timer = jnp.where(subwave_complete, jnp.zeros((n,), jnp.int32), new_timer)
+        final_kills = jnp.where(subwave_complete, jnp.array(0, jnp.int32), state.kills_in_subwave)
 
         return state.replace(
-            key=key,
-            enemy_x=jnp.where(
-                spawn_enemies,
-                ex,
-                state.enemy_x,
-            ),
-            enemy_y=jnp.where(
-                spawn_enemies,
-                ey,
-                state.enemy_y,
-            ),
-            enemy_type=jnp.where(
-                spawn_enemies,
-                et,
-                state.enemy_type,
-            ),
-            enemy_vy=jnp.where(
-                spawn_enemies,
-                evy,
-                state.enemy_vy,
-            ),
-            enemy_phase=jnp.where(
-                spawn_enemies,
-                eph,
-                state.enemy_phase,
-            ),
-            enemy_alive=jnp.where(
-                spawn_enemies,
-                jnp.ones(
-                    (self.consts.NUM_ENEMIES,),
-                    dtype=jnp.bool_,
-                ),
-                state.enemy_alive,
-            ),
-            wave=next_wave,
-            wave_timer=new_wave_timer,
-            score=state.score + wave_bonus,
+            enemy_state=final_enemy_state,
+            enemy_timer=final_timer,
+            enemy_x=final_x,
+            enemy_y=final_y,
+            enemy_type=final_type,
+            enemy_vy=final_vy,
+            enemy_phase=final_phase,
+            subwave=next_subwave,
+            level=next_level,
+            kills_in_subwave=final_kills,
+            score=state.score + bonus,
         )
 
     def _explosion_step(self, state):
@@ -1152,6 +1033,9 @@ class JaxStarGunner(
 
         old_score = state.score
 
+        respawning = state.respawn_timer > 0
+        action = jnp.where(respawning, jnp.int32(Action.NOOP), action)
+
         state = self._player_step(state, action)
         state = self._bullet_step(state, action)
 
@@ -1161,7 +1045,15 @@ class JaxStarGunner(
 
         state, damaged = self._resolve_collisions(state)
 
-        state = self._wave_step(state)
+        just_respawned = (state.respawn_timer == 1)
+        state = state.replace(
+            player_x=jnp.where(just_respawned,
+                               jnp.float32(self.consts.PLAYER_START_X), state.player_x),
+            player_y=jnp.where(just_respawned,
+                               jnp.float32(self.consts.PLAYER_START_Y), state.player_y),
+        )
+
+        state = self._enemy_lifecycle_step(state)
         state = self._explosion_step(state)
 
         state = state.replace(
@@ -1233,6 +1125,8 @@ class JaxStarGunner(
             ),
         )
 
+        truncated = state.step_counter >= self.consts.MAX_EPISODE_FRAMES
+        done = done | truncated
         return state, reward, done
 
     def _attract_branch(self, state, a):
@@ -1262,19 +1156,17 @@ class JaxStarGunner(
     def step(self, state: StarGunnerState, action: chex.Array):
         a = jnp.take(self.ACTION_SET, action.astype(jnp.int32))
 
-        # ---------------------------------------------------------
-        # ALE-style sticky action
-        # ---------------------------------------------------------
-
-        state, effective_action = self._apply_sticky_action(
-            state,
-            a,
+        in_play = state.mode == PLAY
+        sticky_state, sticky_action = self._apply_sticky_action(state, a)
+        state = jax.tree.map(
+            lambda new, old: jnp.where(in_play, new, old), sticky_state, state
         )
+        effective_action = jnp.where(in_play, sticky_action, a)
+
         state, reward, done = jax.lax.switch(
             state.mode,
             [self._attract_branch, self._play_branch, self._gameover_branch],
-            state,
-            effective_action,
+            state, effective_action,
         )
         return self._get_observation(state), state, reward, done, self._get_info(state)
 
@@ -1291,8 +1183,8 @@ class JaxStarGunner(
             height=jnp.array(self.consts.PLAYER_HEIGHT),
         )
         enemies = ObjectObservation.create(
-            x=jnp.where(state.enemy_alive, state.enemy_x, -1.0),
-            y=jnp.where(state.enemy_alive, edy, -1.0),
+            x=jnp.where(state.enemy_state == ENEMY_ALIVE, state.enemy_x, -1.0),
+            y=jnp.where(state.enemy_state == ENEMY_ALIVE, edy, -1.0),
             width=ENEMY_W[state.enemy_type],
             height=ENEMY_H[state.enemy_type],
         )
@@ -1356,7 +1248,7 @@ class JaxStarGunner(
     @partial(jax.jit, static_argnums=(0,))
     def _get_info(self, state):
         return StarGunnerInfo(
-            time=state.step_counter, lives=state.lives, wave=state.wave
+            time=state.step_counter, lives=state.lives, wave=state.level
         )
 
 
@@ -1467,6 +1359,10 @@ class StarGunnerRenderer:
         attract_rgb = np.zeros((H, W, 3), np.uint8)
         attract_mask = np.zeros((H, W), bool)
 
+        SHIP_ROW_Y = 24
+        SHIP_COLS = (0, 16, 32)  # Startspalte je Schiff
+        SHIP_W = 8  # Breite je Schiff
+
         temp_masks = []
         temp_rgbs = []
 
@@ -1477,16 +1373,19 @@ class StarGunnerRenderer:
                         attract_rgb[oy + gy, ox + gx] = col
                         attract_mask[oy + gy, ox + gx] = True
 
-            if col == C_RED and oy == 24:
-                curr_mask = np.zeros((H, W), bool)
-                curr_rgb = np.zeros((H, W, 3), np.uint8)
-                for gy, r in enumerate(rows):
-                    for gx, ch in enumerate(r):
-                        if ch == "1":
-                            curr_mask[oy + gy, ox + gx] = True
-                            curr_rgb[oy + gy, ox + gx] = col
-                temp_masks.append(jnp.array(curr_mask))
-                temp_rgbs.append(jnp.array(curr_rgb))
+            if oy == SHIP_ROW_Y and col == C_RED:
+                for c0 in SHIP_COLS:
+                    m = np.zeros((H, W), bool)
+                    g = np.zeros((H, W, 3), np.uint8)
+                    for gy, r in enumerate(rows):
+                        for gx in range(c0, min(c0 + SHIP_W, len(r))):
+                            if r[gx] == "1":
+                                m[oy + gy, ox + gx] = True
+                                g[oy + gy, ox + gx] = col
+                    temp_masks.append(jnp.array(m))
+                    temp_rgbs.append(jnp.array(g))
+
+        assert len(temp_masks) == 3, f"Erwartet 3 Leben-Icons, bekam {len(temp_masks)}"
 
         self.attract_rgb = jnp.array(attract_rgb)
         self.attract_mask = jnp.array(attract_mask)
@@ -1526,10 +1425,10 @@ class StarGunnerRenderer:
         yy = jnp.arange(c.HEIGHT)[:, None]
         xx = jnp.arange(c.WIDTH)[None, :]
         scroll = step.astype(jnp.float32) * c.HILL_SCROLL_SPEED
-        period = 75.0
+        period = 80.0
         u = jnp.mod(xx + scroll, period) / period * 2 * jnp.pi
         wave = jnp.sin(u)
-        amp = 5.0
+        amp = 4.0
         offset = wave * amp
         horizon = c.HILL_Y + offset.astype(jnp.int32)
         grass = yy >= horizon
@@ -1582,32 +1481,49 @@ class StarGunnerRenderer:
             img = draw_bomb(state.bomb_active[i])
 
         # Enemies
-        edy = state.enemy_y + c.ENEMY_AMP * jnp.sin(
-            state.enemy_phase + state.step_counter.astype(jnp.float32) * 0.1
-        ) * (state.enemy_type == SAUCER)
+        edy = enemy_display_y(state.enemy_y, state.enemy_type, state.enemy_phase,
+                              state.step_counter, c.ENEMY_AMP)
 
         for i in range(c.NUM_ENEMIES):
-
-            def draw_enemy(alive):
+            def draw_enemy(est_val, timer_val):
                 def alive_fn(_):
                     etype = state.enemy_type[i]
-                    color = ENEMY_COLOR[etype]
-                    sprite = jax.lax.switch(
+                    saucer_color = jnp.array(c.ENEMY_COLOR_SAUCER, jnp.uint8)
+                    color = jax.lax.switch(
                         etype,
-                        [
-                            lambda: SAUCER_SPRITE,
-                            lambda: BUZZIE_SPRITE,
-                            lambda: SQUEEZER_SPRITE,
-                        ],
+                        [lambda: saucer_color,
+                         lambda: ENEMY_COLOR[BUZZIE],
+                         lambda: ENEMY_COLOR[SQUEEZER]],
                     )
+                    sprite = jax.lax.switch(etype,
+                                            [lambda: SAUCER_SPRITE, lambda: BUZZIE_SPRITE, lambda: SQUEEZER_SPRITE])
                     return draw_sprite(img, state.enemy_x[i], edy[i], sprite, color)
 
-                def dead_fn(_):
+                def reforming_fn(_):
+                    etype = state.enemy_type[i]
+                    saucer_color = jnp.array(c.ENEMY_COLOR_SAUCER, jnp.uint8)
+                    color = jax.lax.switch(
+                        etype,
+                        [lambda: saucer_color,
+                         lambda: ENEMY_COLOR[BUZZIE],
+                         lambda: ENEMY_COLOR[SQUEEZER]],
+                    )
+                    sprite = jax.lax.switch(etype,
+                                            [lambda: SAUCER_SPRITE, lambda: BUZZIE_SPRITE, lambda: SQUEEZER_SPRITE])
+                    flicker = (timer_val % 4) < 2
+                    return jax.lax.cond(
+                        flicker,
+                        lambda _: draw_sprite(img, state.enemy_x[i], edy[i], sprite, color),
+                        lambda _: img,
+                        operand=None,
+                    )
+
+                def empty_fn(_):
                     return img
 
-                return jax.lax.cond(alive, alive_fn, dead_fn, operand=None)
+                return jax.lax.switch(est_val, [empty_fn, alive_fn, empty_fn, reforming_fn], operand=None)
 
-            img = draw_enemy(state.enemy_alive[i])
+            img = draw_enemy(state.enemy_state[i], state.enemy_timer[i])
 
         # Bullets
         for i in range(c.MAX_BULLETS):
@@ -1667,19 +1583,7 @@ class StarGunnerRenderer:
                 sprite = jnp.where(
                     state.player_facing > 0, PLAYER_SPRITE, PLAYER_SPRITE_LEFT
                 )
-                is_moving = (state.player_x != state.prev_player_x) | (
-                    state.player_y != state.prev_player_y
-                )
-                is_firing = state.fire_cooldown > 0
-                color = jax.lax.select(
-                    is_firing,
-                    jnp.array([255, 0, 0], jnp.uint8),
-                    jax.lax.select(
-                        is_moving,
-                        jnp.array([255, 255, 0], jnp.uint8),
-                        jnp.array([0, 255, 0], jnp.uint8),
-                    ),
-                )
+                color = jnp.array([0, 255, 0], jnp.uint8)
                 return draw_sprite(img, state.player_x, state.player_y, sprite, color)
 
             def hide_fn(_):
@@ -1746,563 +1650,130 @@ class StarGunnerRenderer:
 # ALE sprite capture helper – run this once to extract exact sprites
 
 
-def capture_sprites_from_ale(num_episodes=5, save_path="star_gunner_sprites.pkl"):
-    """
-    Runs the Gymnasium ALE environment, captures frames, and saves them.
-    You can then manually crop each sprite and replace the arrays above.
-    """
+def capture_sprites_from_ale(num_episodes=2, every_n=30, max_frames=400,
+                             save_path="star_gunner_frames.npz"):
     import gymnasium as gym
-    import pickle
-
-    env = gym.make("ALE/StarGunner-v5", render_mode="rgb_array")
+    env = gym.make("ALE/StarGunner-v5", render_mode="rgb_array", frameskip=1)
+    print(env.action_space.n)
+    print(env.unwrapped.get_action_meanings())
     frames = []
-    for episode in range(num_episodes):
+    for _ in range(num_episodes):
         obs, _ = env.reset()
-        done = False
-        while not done:
-            action = env.action_space.sample()
-            obs, reward, terminated, truncated, _ = env.step(action)
-            done = terminated or truncated
-            frames.append(obs)
-        env.reset()
+        done, t = False, 0
+        while not done and len(frames) < max_frames:
+            obs, _, term, trunc, _ = env.step(env.action_space.sample())
+            done = term or trunc
+            if t % every_n == 0:
+                frames.append(obs.copy())
+            t += 1
     env.close()
-
-    with open(save_path, "wb") as f:
-        pickle.dump(frames, f)
-    print(f"Captured {len(frames)} frames. Saved to {save_path}")
-    print(
-        "Manually inspect each frame, crop the sprite regions, and replace the placeholder arrays."
-    )
-
+    arr = np.asarray(frames, np.uint8)
+    np.savez_compressed(save_path, frames=arr)
+    print(f"{len(arr)} Frames gespeichert nach {save_path}")
+    return arr
 
 # Local preview (human play with keyboard)
 
 
 if __name__ == "__main__":
-    import jax
-    import gymnasium as gym
-    import ale_py
+    # capture_sprites_from_ale()
 
-    # Register ALE environments with Gymnasium
-    gym.register_envs(ale_py)
+    import matplotlib.pyplot as plt
+    import matplotlib.animation as animation
 
-    print("=" * 70)
-    print("STAR GUNNER - JAX vs ALE TEST")
-    print("=" * 70)
+    env = JaxStarGunner()
+    _, g_state = env.reset(jax.random.PRNGKey(0))
+    held = {"up": False, "down": False, "left": False, "right": False, "fire": False}
 
-    # ==================================================================
-    # TEST CONFIGURATION
-    # ==================================================================
-
-    SEED = 0
-
-    TEST_ACTIONS = [
-        0,   # NOOP
-        3,   # RIGHT
-        3,   # RIGHT
-        6,   # UP + RIGHT
-        1,   # FIRE
-        12,  # LEFT + FIRE
-        8,   # DOWN + RIGHT
-        5,   # DOWN
-        10,  # UP + FIRE
-        0,   # NOOP
-    ]
-
-    # ==================================================================
-    # JAX ACTION SET
-    # ==================================================================
-
-    print("\nJAX ACTION SET")
-    print("-" * 70)
-
-    for action_id, action in enumerate(JaxStarGunner.ACTION_SET):
-        print(
-            f"JAX action {action_id:2d} -> {int(action)}"
+    def action_idx():
+        u, d, l, r, f = (
+            held["up"],
+            held["down"],
+            held["left"],
+            held["right"],
+            held["fire"],
         )
+        # ---------------------------------------------------------
+        # Fire + diagonal
+        # ---------------------------------------------------------
+        if f and u and r:
+            return 14  # UPRIGHTFIRE
+        if f and u and l:
+            return 15  # UPLEFTFIRE
+        if f and d and r:
+            return 16  # DOWNRIGHTFIRE
+        if f and d and l:
+            return 17  # DOWNLEFTFIRE
+        # ---------------------------------------------------------
+        # Fire + cardinal direction
+        # ---------------------------------------------------------
+        if f and u:
+            return 10  # UPFIRE
+        if f and r:
+            return 11  # RIGHTFIRE
+        if f and l:
+            return 12  # LEFTFIRE
+        if f and d:
+            return 13  # DOWNFIRE
+        # ---------------------------------------------------------
+        # Fire only
+        # ---------------------------------------------------------
+        if f:
+            return 1  # FIRE
+        # ---------------------------------------------------------
+        # Diagonal movement
+        # ---------------------------------------------------------
+        if u and r:
+            return 6  # UPRIGHT
+        if u and l:
+            return 7  # UPLEFT
+        if d and r:
+            return 8  # DOWNRIGHT
+        if d and l:
+            return 9  # DOWNLEFT
+        # ---------------------------------------------------------
+        # Cardinal movement
+        # ---------------------------------------------------------
+        if u:
+            return 2
+        if r:
+            return 3
+        if l:
+            return 4
+        if d:
+            return 5
+        return 0  # NOOP
 
-    print(
-        "\nNumber of JAX actions:",
-        len(JaxStarGunner.ACTION_SET),
+    fig, ax = plt.subplots(figsize=(4, 5.25))
+    fig.patch.set_facecolor("black")
+    ax.set_facecolor("black")
+    ax.set_position([0, 0, 1, 1])
+    ax.axis("off")
+    im = ax.imshow(np.asarray(env.render(g_state)).astype(np.uint8), aspect="auto")
+
+    def on_press(e):
+        if e.key in ("up", "down", "left", "right"):
+            held[e.key] = True
+        elif e.key == " ":
+            held["fire"] = True
+
+    def on_release(e):
+        if e.key in ("up", "down", "left", "right"):
+            held[e.key] = False
+        elif e.key == " ":
+            held["fire"] = False
+
+    fig.canvas.mpl_connect("key_press_event", on_press)
+    fig.canvas.mpl_connect("key_release_event", on_release)
+
+    def update(_):
+        global g_state
+        _, g_state, _, _, _ = env.step(g_state, jnp.array(action_idx(), jnp.int32))
+        im.set_data(np.asarray(env.render(g_state)).astype(np.uint8))
+        return [im]
+
+    print("Arrow keys move, SPACE fires. Press SPACE on the title to start.")
+    _ani = animation.FuncAnimation(
+        fig, update, interval=33, blit=False, cache_frame_data=False
     )
-
-    # ==================================================================
-    # 1. JAX ENVIRONMENT
-    # ==================================================================
-
-    print("\n")
-    print("=" * 70)
-    print("1. JAX ENVIRONMENT")
-    print("=" * 70)
-
-    jax_env = JaxStarGunner(
-        StarGunnerConstants(
-            FRAMESKIP=1,
-            STICKY_ACTION_PROB=0.0,
-            DEATH_PENALTY=0.0,
-        ),
-        start_in_play=True,
-    )
-
-    key = jax.random.PRNGKey(SEED)
-
-    jax_obs, jax_state = jax_env.reset(key)
-
-    print("\nInitial JAX state")
-    print("-" * 70)
-    print("Score :", int(jax_state.score))
-    print("Lives :", int(jax_state.lives))
-    print("Wave  :", int(jax_state.wave))
-    print(
-        "Player:",
-        float(jax_state.player_x),
-        float(jax_state.player_y),
-    )
-
-    assert int(jax_state.score) == 0
-    assert int(jax_state.lives) == 3
-    assert int(jax_state.wave) == 1
-
-    print("\n✓ JAX reset test passed")
-
-    # ==================================================================
-    # 1.1 JAX NOOP TEST
-    # ==================================================================
-
-    jax_obs, jax_state2, jax_reward, jax_done, jax_info = (
-        jax_env.step(jax_state, 0)
-    )
-
-    print("\n--- JAX NOOP TEST ---")
-    print("Action :", 0)
-    print("Reward :", float(jax_reward))
-    print("Score  :", int(jax_state2.score))
-    print("Lives  :", int(jax_state2.lives))
-    print("Wave   :", int(jax_state2.wave))
-    print("Done   :", bool(jax_done))
-
-    assert float(jax_reward) == 0.0
-    assert int(jax_state2.score) == int(jax_state.score)
-    assert int(jax_state2.lives) == int(jax_state.lives)
-    assert int(jax_state2.wave) == int(jax_state.wave)
-    assert not bool(jax_done)
-
-    print("✓ JAX NOOP test passed")
-
-    # ==================================================================
-    # 2. JAX ACTION SEQUENCE
-    # ==================================================================
-
-    print("\n")
-    print("=" * 70)
-    print("2. JAX ACTION SEQUENCE")
-    print("=" * 70)
-
-    jax_state = jax_state2
-
-    jax_results = []
-
-    previous_score = int(jax_state.score)
-    previous_lives = int(jax_state.lives)
-    previous_wave = int(jax_state.wave)
-
-    for i, action in enumerate(TEST_ACTIONS):
-
-        (
-            jax_obs,
-            jax_state,
-            jax_reward,
-            jax_done,
-            jax_info,
-        ) = jax_env.step(jax_state, action)
-
-        current_score = int(jax_state.score)
-        current_lives = int(jax_state.lives)
-        current_wave = int(jax_state.wave)
-
-        score_delta = current_score - previous_score
-        lives_delta = current_lives - previous_lives
-        wave_delta = current_wave - previous_wave
-
-        print(
-            f"Step {i:02d} | "
-            f"Action={action:2d} | "
-            f"Reward={float(jax_reward):8.1f} | "
-            f"Score={current_score:5d} "
-            f"(Δ{score_delta:+4d}) | "
-            f"Lives={current_lives} "
-            f"(Δ{lives_delta:+2d}) | "
-            f"Wave={current_wave} "
-            f"(Δ{wave_delta:+2d}) | "
-            f"Done={bool(jax_done)}"
-        )
-
-        # Basic sanity checks
-        assert current_score >= previous_score
-        assert current_lives <= previous_lives
-
-        jax_results.append(
-            {
-                "step": i,
-                "action": action,
-                "reward": float(jax_reward),
-                "score": current_score,
-                "lives": current_lives,
-                "wave": current_wave,
-                "done": bool(jax_done),
-                "player_x": float(jax_state.player_x),
-                "player_y": float(jax_state.player_y),
-            }
-        )
-
-        previous_score = current_score
-        previous_lives = current_lives
-        previous_wave = current_wave
-
-        if bool(jax_done):
-            break
-
-    print("\n✓ JAX action sequence finished")
-
-    # ==================================================================
-    # 3. ALE ENVIRONMENT
-    # ==================================================================
-
-    print("\n")
-    print("=" * 70)
-    print("3. ALE ENVIRONMENT")
-    print("=" * 70)
-
-    try:
-
-        ale_env = gym.make(
-            "ALE/StarGunner-v5",
-            frameskip=1,
-            repeat_action_probability=0.0,
-        )
-
-        # --------------------------------------------------------------
-        # ALE RESET
-        # --------------------------------------------------------------
-
-        ale_obs, ale_info = ale_env.reset(seed=SEED)
-
-        print("\nInitial ALE state")
-        print("-" * 70)
-        print("Observation shape:", ale_obs.shape)
-        print("Observation dtype:", ale_obs.dtype)
-
-        # --------------------------------------------------------------
-        # ALE ACTION SPACE
-        # --------------------------------------------------------------
-
-        print("\nALE action space")
-        print("-" * 70)
-        print("Action space   :", ale_env.action_space)
-        print("Number actions :", ale_env.action_space.n)
-
-        assert ale_env.action_space.n == len(
-            JaxStarGunner.ACTION_SET
-        )
-
-        print("\n✓ JAX and ALE both have 18 actions")
-
-        # --------------------------------------------------------------
-        # ALE ACTION MEANINGS
-        # --------------------------------------------------------------
-
-        print("\nALE action meanings")
-        print("-" * 70)
-
-        action_meanings = ale_env.unwrapped.get_action_meanings()
-
-        for action_id, meaning in enumerate(action_meanings):
-            print(
-                f"ALE action {action_id:2d} -> {meaning}"
-            )
-
-        # --------------------------------------------------------------
-        # JAX ACTION MEANINGS
-        # --------------------------------------------------------------
-
-        print("\nJAX action meanings")
-        print("-" * 70)
-
-        jax_action_names = [
-            "NOOP",
-            "FIRE",
-            "UP",
-            "RIGHT",
-            "LEFT",
-            "DOWN",
-            "UPRIGHT",
-            "UPLEFT",
-            "DOWNRIGHT",
-            "DOWNLEFT",
-            "UPFIRE",
-            "RIGHTFIRE",
-            "LEFTFIRE",
-            "DOWNFIRE",
-            "UPRIGHTFIRE",
-            "UPLEFTFIRE",
-            "DOWNRIGHTFIRE",
-            "DOWNLEFTFIRE",
-        ]
-
-        for action_id, name in enumerate(jax_action_names):
-            print(
-                f"JAX action {action_id:2d} -> {name}"
-            )
-
-        # --------------------------------------------------------------
-        # ACTION SPACE COMPARISON
-        # --------------------------------------------------------------
-
-        print("\n")
-        print("=" * 70)
-        print("4. ACTION SPACE COMPARISON")
-        print("=" * 70)
-
-        print(
-            f"{'ID':>4} | "
-            f"{'JAX':<18} | "
-            f"{'ALE':<18} | "
-            f"{'MATCH':<8}"
-        )
-
-        print("-" * 70)
-
-        action_mapping_matches = True
-
-        for action_id in range(len(jax_action_names)):
-
-            jax_name = jax_action_names[action_id]
-            ale_name = action_meanings[action_id]
-
-            # Normalize ALE naming
-            ale_name_normalized = ale_name.upper()
-
-            match = (
-                jax_name.upper()
-                == ale_name_normalized
-            )
-
-            if not match:
-                action_mapping_matches = False
-
-            print(
-                f"{action_id:4d} | "
-                f"{jax_name:<18} | "
-                f"{ale_name:<18} | "
-                f"{'✓' if match else '✗':<8}"
-            )
-
-        if action_mapping_matches:
-            print(
-                "\n✓ JAX and ALE action mappings match"
-            )
-        else:
-            print(
-                "\n⚠ JAX and ALE action mappings differ"
-            )
-
-        # --------------------------------------------------------------
-        # ALE NOOP TEST
-        # --------------------------------------------------------------
-
-        ale_obs, ale_reward, ale_terminated, ale_truncated, ale_info = (
-            ale_env.step(0)
-        )
-
-        ale_done = ale_terminated or ale_truncated
-
-        print("\n--- ALE NOOP TEST ---")
-        print("Action :", 0)
-        print("Reward :", float(ale_reward))
-        print("Done   :", bool(ale_done))
-
-        # --------------------------------------------------------------
-        # ALE ACTION SEQUENCE
-        # --------------------------------------------------------------
-
-        print("\n")
-        print("=" * 70)
-        print("5. ALE ACTION SEQUENCE")
-        print("=" * 70)
-
-        ale_results = []
-
-        ale_cumulative_reward = 0.0
-
-        for i, action in enumerate(TEST_ACTIONS):
-
-            (
-                ale_obs,
-                ale_reward,
-                ale_terminated,
-                ale_truncated,
-                ale_info,
-            ) = ale_env.step(action)
-
-            ale_done = ale_terminated or ale_truncated
-
-            ale_reward = float(ale_reward)
-
-            ale_cumulative_reward += ale_reward
-
-            print(
-                f"Step {i:02d} | "
-                f"Action={action:2d} | "
-                f"Reward={ale_reward:8.1f} | "
-                f"Cumulative={ale_cumulative_reward:8.1f} | "
-                f"Done={bool(ale_done)}"
-            )
-
-            ale_results.append(
-                {
-                    "step": i,
-                    "action": action,
-                    "reward": ale_reward,
-                    "done": bool(ale_done),
-                }
-            )
-
-            if ale_done:
-                break
-
-        print("\n✓ ALE action sequence finished")
-
-        # --------------------------------------------------------------
-        # FINAL COMPARISON
-        # --------------------------------------------------------------
-
-        print("\n")
-        print("=" * 70)
-        print("6. JAX vs ALE COMPARISON")
-        print("=" * 70)
-
-        print(
-            f"{'Step':>4} | "
-            f"{'Action':>6} | "
-            f"{'JAX Reward':>12} | "
-            f"{'ALE Reward':>12} | "
-            f"{'Difference':>12}"
-        )
-
-        print("-" * 70)
-
-        max_reward_difference = 0.0
-
-        comparison_length = min(
-            len(jax_results),
-            len(ale_results),
-        )
-
-        for i in range(comparison_length):
-
-            jax_result = jax_results[i]
-            ale_result = ale_results[i]
-
-            jax_reward = jax_result["reward"]
-            ale_reward = ale_result["reward"]
-
-            difference = jax_reward - ale_reward
-
-            max_reward_difference = max(
-                max_reward_difference,
-                abs(difference),
-            )
-
-            print(
-                f"{i:4d} | "
-                f"{jax_result['action']:6d} | "
-                f"{jax_reward:12.1f} | "
-                f"{ale_reward:12.1f} | "
-                f"{difference:12.1f}"
-            )
-
-        # --------------------------------------------------------------
-        # SUMMARY
-        # --------------------------------------------------------------
-
-        print("\n")
-        print("=" * 70)
-        print("7. SUMMARY")
-        print("=" * 70)
-
-        print(
-            "JAX action count :",
-            len(JaxStarGunner.ACTION_SET),
-        )
-
-        print(
-            "ALE action count :",
-            ale_env.action_space.n,
-        )
-
-        print(
-            "Action mapping   :",
-            "MATCH" if action_mapping_matches else "DIFFERENT",
-        )
-
-        print(
-            "JAX final score  :",
-            jax_results[-1]["score"]
-            if jax_results
-            else 0,
-        )
-
-        print(
-            "ALE cumulative reward:",
-            ale_cumulative_reward,
-        )
-
-        print(
-            "Max reward difference:",
-            max_reward_difference,
-        )
-
-        print("\nImportant:")
-        print(
-            "Different JAX/ALE rewards are expected at this stage "
-            "because the JAX implementation is a custom reimplementation."
-        )
-
-        print(
-            "The purpose of this test is first to verify the action "
-            "space and basic environment behavior."
-        )
-
-        ale_env.close()
-
-        print("\n✓ ALE test finished successfully")
-
-    except Exception as e:
-
-        print("\n")
-        print("=" * 70)
-        print("ALE TEST FAILED")
-        print("=" * 70)
-
-        print(
-            type(e).__name__,
-            ":",
-            str(e),
-        )
-
-        print(
-            "\nMake sure ALE/Gymnasium is installed and "
-            "ALE/StarGunner-v5 is available."
-        )
-
-        raise
-
-    # ==================================================================
-    # FINAL RESULT
-    # ==================================================================
-
-    print("\n")
-    print("=" * 70)
-    print("TEST COMPLETED")
-    print("=" * 70)
-
+    plt.show()
